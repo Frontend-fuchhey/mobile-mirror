@@ -1,0 +1,54 @@
+package com.mirror.display;
+
+/**
+ * Physical display metadata extracted via DisplayManagerGlobal reflection or dumpsys fallback.
+ */
+public final class DisplayInfo {
+    public static final int FLAG_SUPPORTS_PROTECTED_BUFFERS = 1;
+
+    private final int displayId;
+    private final Size size;
+    private final int rotation;
+    private final int layerStack;
+    private final int flags;
+    private final int dpi;
+    private final String uniqueId;
+
+    public DisplayInfo(int displayId, Size size, int rotation, int layerStack, int flags, int dpi, String uniqueId) {
+        this.displayId = displayId;
+        this.size = size;
+        this.rotation = rotation;
+        this.layerStack = layerStack;
+        this.flags = flags;
+        this.dpi = dpi;
+        this.uniqueId = uniqueId;
+    }
+
+    public int getDisplayId() {
+        return displayId;
+    }
+
+    public Size getSize() {
+        return size;
+    }
+
+    public int getRotation() {
+        return rotation;
+    }
+
+    public int getLayerStack() {
+        return layerStack;
+    }
+
+    public int getFlags() {
+        return flags;
+    }
+
+    public int getDpi() {
+        return dpi;
+    }
+
+    public String getUniqueId() {
+        return uniqueId;
+    }
+}
