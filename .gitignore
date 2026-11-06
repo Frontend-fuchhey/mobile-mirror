@@ -1,0 +1,20 @@
+# Rust build artifacts
+client/target/
+
+# Android server build artifacts
+server/.gradle/
+server/build/
+server/server.jar
+
+# Screen recordings
+recordings/*.mp4
+
+# Logs & temporary files
+*.log
+err.txt
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
