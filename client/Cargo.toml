@@ -1,0 +1,20 @@
+[package]
+name = "mobile-mirror-client"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-low-latency Android screen mirroring and zero-copy MP4 recording client using FFmpeg (NVDEC/DXVA2) and SDL3"
+
+[features]
+default = []
+# Enable compile-time static/import-lib linking when FFmpeg and SDL3 SDKs are configured via FFMPEG_LIB_DIR / SDL3_LIB_DIR
+link-system-libs = []
+
+[[bin]]
+name = "mobile-mirror-client"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
