@@ -1,0 +1,32 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.mirror'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+def sdkDir = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "${System.getenv('LOCALAPPDATA')}/Android/Sdk"
+def platformsDir = file("$sdkDir/platforms")
+def latestPlatform = platformsDir.listFiles()?.sort { it.name }?.last()
+def buildToolsDir = file("$sdkDir/build-tools")
+def latestBuildTools = buildToolsDir.listFiles()?.sort { it.name }?.last()
+
+dependencies {
+    if (latestPlatform != null) {
+        compileOnly files("${latestPlatform}/android.jar")
+    }
+}
+
+tasks.register('dexJar', Exec) {
+    dependsOn compileJava
+    def d8Exec = System.getProperty('os.name').toLowerCase().contains('windows')
+            ? "${latestBuildTools}/d8.bat"
+            : "${latestBuildTools}/d8"
+    def classFiles = fileTree("${layout.buildDirectory.get()}/classes/java/main").matching { include '**/*.class' }.files
+    commandLine([d8Exec, '--min-api', '21', '--lib', "${latestPlatform}/android.jar", '--output', "${projectDir}/server.jar"] + classFiles.collect { it.absolutePath })
+}
