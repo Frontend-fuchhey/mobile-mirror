@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Path $ClassesDir -Force | Out-Null
 $JavaFiles = Get-ChildItem (Join-Path $ScriptDir "src\main\java") -Recurse -Filter "*.java" | ForEach-Object { $_.FullName }
 
 Write-Host "[Build] Compiling $($JavaFiles.Count) Java source files..." -ForegroundColor Yellow
-& javac --release 11 -cp $AndroidJar -d $ClassesDir $JavaFiles
+& javac --release 11 -Xlint:-options -cp $AndroidJar -d $ClassesDir $JavaFiles
 if ($LASTEXITCODE -ne 0) {
     throw "javac compilation failed with exit code $LASTEXITCODE"
 }
