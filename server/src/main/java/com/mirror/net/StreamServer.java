@@ -8,8 +8,8 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 
 /**
- * Low-latency local TCP server using NIO ServerSocketChannel and SocketChannel
- * to enable zero-copy direct ByteBuffer writes (writev) from MediaCodec.
+ * Low-latency local ADB TCP server (127.0.0.1:port) using NIO ServerSocketChannel
+ * and SocketChannel to enable zero-copy direct ByteBuffer writes (writev) from MediaCodec.
  */
 public final class StreamServer implements Closeable {
     private static final int SEND_BUFFER_SIZE = 2 * 1024 * 1024; // 2 MiB socket send buffer
@@ -24,16 +24,16 @@ public final class StreamServer implements Closeable {
         this.serverChannel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
 
         IOException lastException = null;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 8; i++) {
             try {
                 this.serverChannel.bind(new InetSocketAddress("127.0.0.1", port), 1);
                 lastException = null;
                 break;
             } catch (IOException e) {
                 lastException = e;
-                System.err.println("[MirrorServer] Port " + port + " busy, retrying in 250ms (attempt " + (i + 1) + "/5)...");
+                System.err.println("[MirrorServer] Port " + port + " busy, retrying in 150ms (attempt " + (i + 1) + "/8)...");
                 try {
-                    Thread.sleep(250);
+                    Thread.sleep(150);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                     break;
@@ -46,7 +46,7 @@ public final class StreamServer implements Closeable {
     }
 
     /**
-     * Waits for the desktop client to connect via ADB port forwarding (127.0.0.1:port)
+     * Waits for the desktop client to connect via ADB USB port forwarding (127.0.0.1:port)
      * and configures TCP_NODELAY for sub-50ms real-time streaming.
      */
     public SocketChannel acceptClient() throws IOException {
