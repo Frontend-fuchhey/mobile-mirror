@@ -12,10 +12,11 @@ import com.mirror.video.ScreenCapture;
 import com.mirror.video.SurfaceEncoder;
 
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 
 /**
- * Main entry point for the Android screen mirroring server.
+ * Main entry point for the Android USB screen mirroring server.
  *
  * Execution command (UID 2000 / shell):
  *   adb push server/server.jar /data/local/tmp/server.jar
@@ -69,9 +70,9 @@ public final class Server {
 
             audioCapture.start(streamer);
 
-            // Listen for real-time control commands from the desktop client (e.g. [M] to toggle Mic ON/OFF)
+            // Listen for real-time control commands from the desktop client (e.g. [M] to toggle Mic ON/OFF, [K] for instant IDR keyframe)
             Thread controlThread = new Thread(() -> {
-                java.nio.ByteBuffer cmdBuf = java.nio.ByteBuffer.allocate(1);
+                ByteBuffer cmdBuf = ByteBuffer.allocate(1);
                 try {
                     while (!Thread.currentThread().isInterrupted()) {
                         cmdBuf.clear();
@@ -85,6 +86,8 @@ public final class Server {
                                 audioCapture.setMicEnabled(true);
                             } else if (cmd == 0 || cmd == 'm') {
                                 audioCapture.setMicEnabled(false);
+                            } else if (cmd == 2 || cmd == 'K' || cmd == 'k') {
+                                encoder.requestSyncFrame();
                             }
                         }
                     }
@@ -101,7 +104,6 @@ public final class Server {
         }
     }
 
-    @SuppressWarnings("deprecation")
     @SuppressLint("DiscouragedPrivateApi")
     private static void prepareMainLooper() {
         Looper.prepare();
