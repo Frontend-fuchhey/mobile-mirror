@@ -46,7 +46,7 @@ public final class AudioCapture implements Closeable {
     public static final int SAMPLE_RATE = 48000;
     public static final int CHANNELS = 2;
     public static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
-    private static final int AAC_BIT_RATE = 128_000;
+    private static final int AAC_BIT_RATE = 192_000; // 192 kbps studio-grade stereo AAC-LC
     private static final int FRAME_BYTES = 4096; // 1024 stereo 16-bit PCM frames (21.33ms @ 48kHz)
 
     private final AtomicBoolean stopped = new AtomicBoolean(false);
