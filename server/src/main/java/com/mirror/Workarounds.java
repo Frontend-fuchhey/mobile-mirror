@@ -13,25 +13,37 @@ import java.lang.reflect.Method;
 /**
  * Spoofs Android's internal ActivityThread state when running as a standalone
  * command-line DEX process under app_process (UID 2000 / shell).
+ * Safely no-ops if a real ActivityThread already exists.
  */
 public final class Workarounds {
     private static final Class<?> ACTIVITY_THREAD_CLASS;
     private static final Object ACTIVITY_THREAD;
+    private static final boolean IS_SYNTHETIC_THREAD;
 
     static {
         try {
             ACTIVITY_THREAD_CLASS = Class.forName("android.app.ActivityThread");
-            Constructor<?> constructor = ACTIVITY_THREAD_CLASS.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            ACTIVITY_THREAD = constructor.newInstance();
+            Method currentMethod = ACTIVITY_THREAD_CLASS.getDeclaredMethod("currentActivityThread");
+            currentMethod.setAccessible(true);
+            Object existing = currentMethod.invoke(null);
 
-            Field sCurrentActivityThreadField = ACTIVITY_THREAD_CLASS.getDeclaredField("sCurrentActivityThread");
-            sCurrentActivityThreadField.setAccessible(true);
-            sCurrentActivityThreadField.set(null, ACTIVITY_THREAD);
+            if (existing != null) {
+                ACTIVITY_THREAD = existing;
+                IS_SYNTHETIC_THREAD = false;
+            } else {
+                Constructor<?> constructor = ACTIVITY_THREAD_CLASS.getDeclaredConstructor();
+                constructor.setAccessible(true);
+                ACTIVITY_THREAD = constructor.newInstance();
+                IS_SYNTHETIC_THREAD = true;
 
-            Field mSystemThreadField = ACTIVITY_THREAD_CLASS.getDeclaredField("mSystemThread");
-            mSystemThreadField.setAccessible(true);
-            mSystemThreadField.setBoolean(ACTIVITY_THREAD, true);
+                Field sCurrentActivityThreadField = ACTIVITY_THREAD_CLASS.getDeclaredField("sCurrentActivityThread");
+                sCurrentActivityThreadField.setAccessible(true);
+                sCurrentActivityThreadField.set(null, ACTIVITY_THREAD);
+
+                Field mSystemThreadField = ACTIVITY_THREAD_CLASS.getDeclaredField("mSystemThread");
+                mSystemThreadField.setAccessible(true);
+                mSystemThreadField.setBoolean(ACTIVITY_THREAD, true);
+            }
         } catch (Exception e) {
             throw new AssertionError("Failed to initialize ActivityThread workaround", e);
         }
@@ -41,6 +53,9 @@ public final class Workarounds {
     }
 
     public static void apply() {
+        if (!IS_SYNTHETIC_THREAD) {
+            return;
+        }
         if (Build.VERSION.SDK_INT >= 31) {
             fillConfigurationController();
         }
