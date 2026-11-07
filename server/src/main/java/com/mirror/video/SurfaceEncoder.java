@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 1/2
 package com.mirror.video;
 
 import android.media.MediaCodec;
@@ -130,3 +129,134 @@ public final class SurfaceEncoder {
             }
         }
     }
+
+    private static MediaCodec resetOrRecreateCodec(MediaCodec codec, String encoderName) throws IOException {
+        try {
+            codec.reset();
+            return codec;
+        } catch (Throwable ignored) {
+            try {
+                codec.release();
+            } catch (Throwable ignored2) {
+            }
+            return createHardwareEncoder(encoderName);
+        }
+    }
+
+    private boolean encodeLoop(MediaCodec codec, NalStreamer streamer) throws IOException {
+        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        long lastCheck = System.currentTimeMillis();
+
+        while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+            try {
+                int outputIndex = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US);
+                if (outputIndex >= 0) {
+                    try {
+                        boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                        if (bufferInfo.size > 0) {
+                            ByteBuffer outputBuffer = codec.getOutputBuffer(outputIndex);
+                            if (outputBuffer != null) {
+                                streamer.writePacket(outputBuffer, bufferInfo);
+                            }
+                        }
+                        if (eos) {
+                            return false;
+                        }
+                    } finally {
+                        codec.releaseOutputBuffer(outputIndex, false);
+                    }
+                } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    MediaFormat newFormat = codec.getOutputFormat();
+                    System.out.println("[MirrorServer] Encoder output format negotiated: " + newFormat);
+                }
+            } catch (IllegalStateException codecErr) {
+                System.err.println("[MirrorServer] Encoder state transition (" + codecErr.getMessage() + "), reconfiguring...");
+                return true;
+            }
+
+            long now = System.currentTimeMillis();
+            if (now - lastCheck >= 200) {
+                lastCheck = now;
+                if (capture.checkDisplayChanged()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public void stop() {
+        stopped.set(true);
+    }
+
+    private static MediaCodec createHardwareEncoder(String encoderName) throws IOException {
+        if (encoderName != null && !encoderName.isEmpty()) {
+            return MediaCodec.createByCodecName(encoderName);
+        }
+        return MediaCodec.createEncoderByType(MIME_TYPE_AVC);
+    }
+
+    private static MediaFormat createLowLatencyFormat(
+            Size size,
+            Options options,
+            boolean highProfile,
+            boolean includeAdvancedKeys
+    ) {
+        MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE_AVC, size.getWidth(), size.getHeight());
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, options.getBitRate());
+        int targetFps = Math.max(30, options.getMaxFps());
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, targetFps);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, options.getIFrameInterval());
+
+        long repeatDelayUs = Math.max(8_333L, Math.min(REPEAT_FRAME_DELAY_US, 1_000_000L / Math.max(60, targetFps)));
+        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatDelayUs);
+
+        if (options.getMaxFps() > 0) {
+            format.setFloat(KEY_MAX_FPS_TO_ENCODER, (float) options.getMaxFps());
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
+            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
+            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
+        }
+
+        if (highProfile && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            format.setInteger(
+                    MediaFormat.KEY_PROFILE,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+            );
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                int pixels = size.getWidth() * size.getHeight();
+                int level = (pixels <= 2_073_600)
+                        ? MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                        : MediaCodecInfo.CodecProfileLevel.AVCLevel51;
+                format.setInteger(MediaFormat.KEY_LEVEL, level);
+            }
+        }
+
+        if (includeAdvancedKeys) {
+            if (options.isCbr()) {
+                format.setInteger(
+                        MediaFormat.KEY_BITRATE_MODE,
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                );
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // Realtime priority (0) and full hardware operating rate
+                format.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, targetFps);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // Sub-frame / single-frame hardware latency
+                format.setInteger(MediaFormat.KEY_LATENCY, 0);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Eliminate B-frames to avoid frame reordering latency while preserving High Profile CABAC/8x8 DCT
+                format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
+            }
+        }
+        return format;
+    }
+}
