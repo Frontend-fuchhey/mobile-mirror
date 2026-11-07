@@ -1,16 +1,16 @@
 package com.mirror;
 
 /**
- * Runtime configuration for the Android screen mirroring server.
- * Defaults to 12 Mbps CBR, 60 FPS, TCP port 12345, display 0.
+ * Runtime configuration for the Android USB screen mirroring server.
+ * Defaults to 24 Mbps CBR, 60 FPS, local ADB TCP port 12345 (127.0.0.1:12345), display 0.
  */
 public final class Options {
     private int port = 12345;
     private int displayId = 0;
     private int maxSize = 0;
     private int maxFps = 60;
-    private int bitRate = 12_000_000; // 12 Mbps default
-    private int iFrameInterval = 2;   // 2 seconds between IDRs for fast recovery & MP4 seeking
+    private int bitRate = 24_000_000; // 24 Mbps studio-grade CBR default
+    private int iFrameInterval = 1;   // 1 second between IDRs for crisp intra-refresh & instant MP4 seeking
     private boolean cbr = true;       // Constant Bitrate Mode (BITRATE_MODE_CBR)
     private boolean sendHeader = true; // Send 12-byte stream header + 12-byte per-packet metadata
     private String encoderName = null;
