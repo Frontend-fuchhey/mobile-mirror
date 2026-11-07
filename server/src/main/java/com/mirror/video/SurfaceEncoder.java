@@ -1,9 +1,11 @@
+// [Mobile Mirror] Progressive implementation phase 1/2
 package com.mirror.video;
 
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Bundle;
 import android.view.Surface;
 
 import com.mirror.Options;
@@ -16,25 +18,43 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Hardware-accelerated H.264 Surface-to-Bitstream encoder using Android MediaCodec.
- * Configured for sub-50ms latency:
+ * Configured for sub-50ms latency and studio-grade recording quality:
  *   - Color format: COLOR_FormatSurface (0x7F000789) for zero-copy GPU/SurfaceFlinger input
- *   - Bitrate: 12 Mbps Constant Bitrate (BITRATE_MODE_CBR)
- *   - Frame rate: 60 FPS
+ *   - Profile: H.264 High Profile (AVCProfileHigh, CABAC + 8x8 DCT) with automatic fallback
+ *   - Bitrate: 24 Mbps Constant Bitrate (BITRATE_MODE_CBR)
+ *   - Frame rate: 60 FPS with 16.67ms continuous repeat-frame cadence (eliminates 10 FPS VFR stutter)
  *   - Zero B-frames (KEY_MAX_B_FRAMES = 0) & realtime priority (KEY_PRIORITY = 0)
  */
 public final class SurfaceEncoder {
     private static final String MIME_TYPE_AVC = MediaFormat.MIMETYPE_VIDEO_AVC; // "video/avc"
     private static final String KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder";
-    private static final long REPEAT_FRAME_DELAY_US = 100_000L; // 100ms
-    private static final long DEQUEUE_TIMEOUT_US = 10_000L;     // 10ms poll timeout
+    private static final long REPEAT_FRAME_DELAY_US = 16_667L; // 16.67ms (60 FPS continuous cadence)
+    private static final long DEQUEUE_TIMEOUT_US = 10_000L;    // 10ms poll timeout
 
     private final ScreenCapture capture;
     private final Options options;
     private final AtomicBoolean stopped = new AtomicBoolean(false);
+    private volatile MediaCodec activeCodec;
 
     public SurfaceEncoder(ScreenCapture capture, Options options) {
         this.capture = capture;
         this.options = options;
+    }
+
+    /**
+     * Requests an immediate hardware IDR sync frame on the very next encoded frame (< 16ms).
+     * Used when the desktop client starts an MP4 recording mid-stream.
+     */
+    public void requestSyncFrame() {
+        MediaCodec c = this.activeCodec;
+        if (c != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            try {
+                Bundle params = new Bundle();
+                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                c.setParameters(params);
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     public void streamScreen(NalStreamer streamer) throws IOException {
@@ -45,29 +65,41 @@ public final class SurfaceEncoder {
             MediaCodec codec = createHardwareEncoder(options.getEncoderName());
             Surface inputSurface = null;
             try {
-                MediaFormat format = createLowLatencyFormat(videoSize, options, true);
+                // Tier 1: H.264 High Profile (CABAC + 8x8 DCT) + CBR + Low Latency
+                boolean configured = false;
                 try {
-                    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-                } catch (Exception e) {
-                    // Fallback if the device's hardware encoder rejects CBR or specific vendor keys
-                    System.err.println("[MirrorServer] CBR/strict format rejected (" + e.getMessage()
-                            + "), retrying with standard low-latency profile...");
+                    MediaFormat highFormat = createLowLatencyFormat(videoSize, options, true, true);
+                    codec.configure(highFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    configured = true;
+                } catch (Exception e1) {
+                    System.err.println("[MirrorServer] High Profile format rejected (" + e1.getMessage()
+                            + "), retrying Tier 2 (Default Profile + CBR)...");
+                    codec = resetOrRecreateCodec(codec, options.getEncoderName());
+                }
+
+                // Tier 2: Default Profile + CBR + Low Latency
+                if (!configured) {
                     try {
-                        codec.reset();
-                    } catch (Throwable ignored) {
-                        try {
-                            codec.release();
-                        } catch (Throwable ignored2) {
-                        }
-                        codec = createHardwareEncoder(options.getEncoderName());
+                        MediaFormat cbrFormat = createLowLatencyFormat(videoSize, options, false, true);
+                        codec.configure(cbrFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                        configured = true;
+                    } catch (Exception e2) {
+                        System.err.println("[MirrorServer] CBR/strict format rejected (" + e2.getMessage()
+                                + "), retrying Tier 3 (Standard low-latency profile)...");
+                        codec = resetOrRecreateCodec(codec, options.getEncoderName());
                     }
-                    format = createLowLatencyFormat(videoSize, options, false);
-                    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                }
+
+                // Tier 3: Standard low-latency baseline fallback
+                if (!configured) {
+                    MediaFormat fallbackFormat = createLowLatencyFormat(videoSize, options, false, false);
+                    codec.configure(fallbackFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
                 }
 
                 inputSurface = codec.createInputSurface();
                 capture.start(inputSurface);
                 codec.start();
+                this.activeCodec = codec;
 
                 System.out.println("[MirrorServer] Hardware encoder started: " + codec.getName()
                         + " (" + videoSize + " @ " + options.getMaxFps() + " FPS, "
@@ -79,6 +111,7 @@ public final class SurfaceEncoder {
                 }
                 System.out.println("[MirrorServer] Display orientation/dimensions changed, reconfiguring encoder...");
             } finally {
+                this.activeCodec = null;
                 capture.close();
                 if (inputSurface != null) {
                     try {
@@ -97,96 +130,3 @@ public final class SurfaceEncoder {
             }
         }
     }
-
-    private boolean encodeLoop(MediaCodec codec, NalStreamer streamer) throws IOException {
-        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        long lastCheck = System.currentTimeMillis();
-
-        while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
-            try {
-                int outputIndex = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US);
-                if (outputIndex >= 0) {
-                    try {
-                        boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-                        if (bufferInfo.size > 0) {
-                            ByteBuffer outputBuffer = codec.getOutputBuffer(outputIndex);
-                            if (outputBuffer != null) {
-                                streamer.writePacket(outputBuffer, bufferInfo);
-                            }
-                        }
-                        if (eos) {
-                            return false;
-                        }
-                    } finally {
-                        codec.releaseOutputBuffer(outputIndex, false);
-                    }
-                } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    MediaFormat newFormat = codec.getOutputFormat();
-                    System.out.println("[MirrorServer] Encoder output format negotiated: " + newFormat);
-                }
-            } catch (IllegalStateException codecErr) {
-                System.err.println("[MirrorServer] Encoder state transition (" + codecErr.getMessage() + "), reconfiguring...");
-                return true;
-            }
-
-            long now = System.currentTimeMillis();
-            if (now - lastCheck >= 200) {
-                lastCheck = now;
-                if (capture.checkDisplayChanged()) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    public void stop() {
-        stopped.set(true);
-    }
-
-    private static MediaCodec createHardwareEncoder(String encoderName) throws IOException {
-        if (encoderName != null && !encoderName.isEmpty()) {
-            return MediaCodec.createByCodecName(encoderName);
-        }
-        return MediaCodec.createEncoderByType(MIME_TYPE_AVC);
-    }
-
-    private static MediaFormat createLowLatencyFormat(Size size, Options options, boolean includeAdvancedKeys) {
-        MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE_AVC, size.getWidth(), size.getHeight());
-        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, options.getBitRate());
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, options.getMaxFps());
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, options.getIFrameInterval());
-        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_DELAY_US);
-
-        if (options.getMaxFps() > 0) {
-            format.setFloat(KEY_MAX_FPS_TO_ENCODER, (float) options.getMaxFps());
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
-        }
-
-        if (includeAdvancedKeys) {
-            if (options.isCbr()) {
-                format.setInteger(
-                        MediaFormat.KEY_BITRATE_MODE,
-                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
-                );
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // Realtime priority (0)
-                format.setInteger(MediaFormat.KEY_PRIORITY, 0);
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // Sub-frame / single-frame hardware latency
-                format.setInteger(MediaFormat.KEY_LATENCY, 0);
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Eliminate B-frames to avoid frame reordering latency
-                format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
-            }
-        }
-        return format;
-    }
-}
