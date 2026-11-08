@@ -306,3 +306,157 @@ impl UsbAutoConnector {
                             return;
                         }
                         if manual_trigger_bg.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            })
+            .expect("Failed to spawn usb-auto-connector thread");
+
+        Self {
+            rx,
+            running,
+            auto_connect,
+            manual_trigger,
+            quality,
+            worker: Some(worker),
+            last_headline: initial_headline,
+            last_subtext: initial_subtext,
+            last_is_connecting: false,
+            last_is_warning: false,
+            last_device_serial: None,
+        }
+    }
+
+    /// Alias for [`UsbAutoConnector::new`].
+    pub fn start(port: u16) -> Self {
+        Self::new(port)
+    }
+
+    /// Updates the encoder quality configuration for the next USB connection.
+    pub fn set_quality(&mut self, q: StreamQualityConfig) {
+        if let Ok(mut guard) = self.quality.lock() {
+            *guard = q;
+        }
+    }
+
+    /// Enables or disables automatic USB connection when a phone is plugged in.
+    pub fn set_auto_connect(&mut self, enabled: bool) {
+        self.auto_connect.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Immediately wakes the background worker and attempts to start mirroring right now.
+    pub fn trigger_connect_now(&mut self) {
+        self.manual_trigger.store(true, Ordering::SeqCst);
+    }
+
+    /// Polls for the latest [`UsbStatus`] in 0 microseconds without ever blocking the UI thread.
+    /// Drains intermediate status updates while guaranteeing [`UsbStatus::Connected`] is never skipped.
+    pub fn poll_status(&mut self) -> Option<UsbStatus> {
+        let mut latest = None;
+        while let Ok(status) = self.rx.try_recv() {
+            match &status {
+                UsbStatus::WaitingForUsb {
+                    headline,
+                    subtext,
+                    is_warning,
+                    device_serial,
+                } => {
+                    self.last_headline = headline.clone();
+                    self.last_subtext = subtext.clone();
+                    self.last_is_connecting = false;
+                    self.last_is_warning = *is_warning;
+                    self.last_device_serial = device_serial.clone();
+                }
+                UsbStatus::Connecting { headline, subtext } => {
+                    self.last_headline = headline.clone();
+                    self.last_subtext = subtext.clone();
+                    self.last_is_connecting = true;
+                    self.last_is_warning = false;
+                }
+                UsbStatus::Connected(_, _) => {
+                    self.last_headline = "Connected".to_string();
+                    self.last_subtext.clear();
+                    self.last_is_connecting = false;
+                    self.last_is_warning = false;
+                    return Some(status);
+                }
+            }
+            latest = Some(status);
+        }
+        latest
+    }
+
+    pub fn headline(&self) -> &str {
+        &self.last_headline
+    }
+
+    pub fn subtext(&self) -> &str {
+        &self.last_subtext
+    }
+
+    pub fn is_connecting(&self) -> bool {
+        self.last_is_connecting
+    }
+
+    pub fn is_warning(&self) -> bool {
+        self.last_is_warning
+    }
+
+    pub fn device_serial(&self) -> Option<&str> {
+        self.last_device_serial.as_deref()
+    }
+
+    /// Signals the background auto-connect thread to stop.
+    pub fn stop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for UsbAutoConnector {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        let _ = self.worker.take();
+    }
+}
+
+/// RAII guard for an active USB ADB mirroring session.
+/// Terminates the local `adb shell` child immediately on drop and dispatches `adb forward --remove`
+/// plus remote `app_process` cleanup on a detached background thread so the UI thread never stalls.
+pub struct AdbSessionGuard {
+    adb_bin: PathBuf,
+    serial: String,
+    port: u16,
+    daemon_child: Option<Child>,
+    cleanup_done: bool,
+}
+
+impl AdbSessionGuard {
+    /// Executes the full USB ADB mirroring pipeline and returns the connected [`StreamReader`]
+    /// alongside its RAII [`AdbSessionGuard`]:
+    /// 1. Locate `adb` & verify an authorized physical USB Android device is attached.
+    /// 2. Locate (or build) `server/server.jar` and push it to `/data/local/tmp/server.jar`.
+    /// 3. Kill any lingering `com.mirror.Server` process FIRST, wait 150ms, clear old forward,
+    ///    and establish `adb -s <serial> forward tcp:<port> tcp:<port>`.
+    /// 4. Spawn `com.mirror.Server` via `app_process` (`12 Mbps CBR`, `60 FPS`).
+    /// 5. Connect `StreamReader` to `127.0.0.1:<port>`, monitoring `daemon_child.try_wait()` on
+    ///    every retry up to 8 seconds so early server failures surface immediately.
+    pub fn start_wired_pipeline<F>(
+        port: u16,
+        on_status: F,
+    ) -> Result<(StreamReader<TcpStream>, Self), String>
+    where
+        F: FnMut(&str),
+    {
+        Self::start_wired_pipeline_internal(port, None, on_status).map_err(|e| e.to_string())
+    }
+
+    /// Same as [`AdbSessionGuard::start_wired_pipeline`], preserving structured [`UsbCheckError`] variants.
+    pub fn start_wired_pipeline_checked<F>(
+        port: u16,
+        on_status: F,
+    ) -> Result<(StreamReader<TcpStream>, Self), UsbCheckError>
+    where
+        F: FnMut(&str),
+    {
