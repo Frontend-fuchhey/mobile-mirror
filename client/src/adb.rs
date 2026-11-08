@@ -460,3 +460,157 @@ impl AdbSessionGuard {
     where
         F: FnMut(&str),
     {
+        Self::start_wired_pipeline_internal(port, None, on_status)
+    }
+
+    fn start_wired_pipeline_internal<F>(
+        port: u16,
+        running: Option<&AtomicBool>,
+        on_status: F,
+    ) -> Result<(StreamReader<TcpStream>, Self), UsbCheckError>
+    where
+        F: FnMut(&str),
+    {
+        Self::start_wired_pipeline_with_quality(
+            port,
+            StreamQualityConfig::default(),
+            running,
+            on_status,
+        )
+    }
+
+    pub fn start_wired_pipeline_with_quality<F>(
+        port: u16,
+        quality: StreamQualityConfig,
+        running: Option<&AtomicBool>,
+        mut on_status: F,
+    ) -> Result<(StreamReader<TcpStream>, Self), UsbCheckError>
+    where
+        F: FnMut(&str),
+    {
+        // Step 1: Locate `adb` & verify physical USB device
+        on_status("Verifying USB connection\u{2026}");
+        let adb_bin = locate_adb_binary()?;
+        let serial = check_usb_device(&adb_bin)?;
+        println!("[ADB] Authorized USB Android device ready: {}", serial);
+
+        if is_cancelled(running) {
+            return Err(UsbCheckError::Other("Connection cancelled".to_string()));
+        }
+
+        // Step 2: Locate (or build) `server/server.jar` and push to `/data/local/tmp/server.jar`
+        on_status("Preparing screen capture engine\u{2026}");
+        let server_jar = locate_or_build_server_jar().map_err(UsbCheckError::Other)?;
+        println!(
+            "[ADB] Pushing {} -> /data/local/tmp/server.jar on {}...",
+            server_jar.display(),
+            serial
+        );
+        let push_out = new_hidden_command(&adb_bin)
+            .args([
+                "-s",
+                &serial,
+                "push",
+                &server_jar.to_string_lossy(),
+                "/data/local/tmp/server.jar",
+            ])
+            .output()
+            .map_err(|e| UsbCheckError::Other(format!("Failed to execute `adb push`: {}", e)))?;
+
+        if !push_out.status.success() {
+            let stderr = String::from_utf8_lossy(&push_out.stderr);
+            let stdout = String::from_utf8_lossy(&push_out.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim()
+            } else {
+                stdout.trim()
+            };
+            if let Err(dev_err) = check_usb_device(&adb_bin) {
+                return Err(dev_err);
+            }
+            return Err(UsbCheckError::Other(format!(
+                "`adb push server.jar` failed: {}",
+                detail
+            )));
+        }
+
+        if is_cancelled(running) {
+            return Err(UsbCheckError::Other("Connection cancelled".to_string()));
+        }
+
+        // Step 3: Kill any lingering `com.mirror.Server` FIRST, wait 150ms, remove old port forward,
+        // and establish a fresh `adb -s <serial> forward tcp:<port> tcp:<port>`.
+        on_status("Opening high-speed USB video tunnel\u{2026}");
+        kill_remote_server(&adb_bin, Some(&serial));
+        thread::sleep(Duration::from_millis(150));
+
+        let forward_spec = format!("tcp:{}", port);
+        let _ = new_hidden_command(&adb_bin)
+            .args(["-s", &serial, "forward", "--remove", &forward_spec])
+            .output();
+
+        let fwd_out = new_hidden_command(&adb_bin)
+            .args(["-s", &serial, "forward", &forward_spec, &forward_spec])
+            .output()
+            .map_err(|e| UsbCheckError::Other(format!("Failed to execute `adb forward`: {}", e)))?;
+
+        if !fwd_out.status.success() {
+            let stderr = String::from_utf8_lossy(&fwd_out.stderr);
+            if let Err(dev_err) = check_usb_device(&adb_bin) {
+                return Err(dev_err);
+            }
+            return Err(UsbCheckError::Other(format!(
+                "`adb forward tcp:{0} tcp:{0}` failed: {1}",
+                port,
+                stderr.trim()
+            )));
+        }
+
+        // Step 4: Spawn `com.mirror.Server` via `app_process` with dynamic quality settings
+        on_status("Starting low-latency hardware video stream over USB");
+        let remote_cmd = format!(
+            "CLASSPATH=/data/local/tmp/server.jar app_process / com.mirror.Server port={} max_size={} bitrate={} fps={} cbr={}",
+            port, quality.max_size, quality.bitrate, quality.fps, quality.cbr
+        );
+        let mut child = new_hidden_command(&adb_bin)
+            .args(["-s", &serial, "shell", &remote_cmd])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                UsbCheckError::Other(format!(
+                    "Failed to spawn `app_process` server daemon: {}",
+                    e
+                ))
+            })?;
+
+        // Drain stdout & stderr continuously on lightweight background threads so OS pipes
+        // never fill/block during multi-hour sessions while keeping recent lines for crash diagnostics.
+        let recent_logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::with_capacity(16)));
+        if let Some(stdout) = child.stdout.take() {
+            let logs_ref = Arc::clone(&recent_logs);
+            let _ = thread::Builder::new()
+                .name("adb-server-stdout".to_string())
+                .spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().map_while(Result::ok) {
+                        println!("{}", line);
+                        push_log_line(&logs_ref, line);
+                    }
+                });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let logs_ref = Arc::clone(&recent_logs);
+            let _ = thread::Builder::new()
+                .name("adb-server-stderr".to_string())
+                .spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        eprintln!("{}", line);
+                        push_log_line(&logs_ref, line);
+                    }
+                });
+        }
+
+        // Wrap immediately in `AdbSessionGuard` so any early return or cancellation automatically
