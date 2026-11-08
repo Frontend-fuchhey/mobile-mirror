@@ -768,3 +768,157 @@ impl Drop for AdbSessionGuard {
                 kill_remote_server(&adb_path, Some(&serial));
             });
 
+        if spawn_res.is_err() {
+            let _ = new_hidden_command(&self.adb_bin)
+                .args([
+                    "-s",
+                    &self.serial,
+                    "forward",
+                    "--remove",
+                    &format!("tcp:{}", self.port),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn is_cancelled(running: Option<&AtomicBool>) -> bool {
+    running.map(|r| !r.load(Ordering::Relaxed)).unwrap_or(false)
+}
+
+fn push_log_line(logs: &Arc<Mutex<Vec<String>>>, line: String) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = logs.lock() {
+        if guard.len() >= 12 {
+            guard.remove(0);
+        }
+        guard.push(trimmed.to_string());
+    }
+}
+
+fn format_recent_logs(logs: &Arc<Mutex<Vec<String>>>) -> String {
+    if let Ok(guard) = logs.lock() {
+        for line in guard.iter().rev() {
+            if line.contains("Error")
+                || line.contains("Exception")
+                || line.contains("terminated")
+                || line.contains("Fatal")
+            {
+                return line.clone();
+            }
+        }
+        if let Some(last) = guard.last() {
+            return last.clone();
+        }
+    }
+    String::new()
+}
+
+fn kill_remote_server(adb_bin: &Path, serial: Option<&str>) {
+    let kill_script = "for pid in $(pidof app_process64 app_process32 app_process 2>/dev/null); do \
+        if grep -q 'com.mirror.Server' /proc/$pid/cmdline 2>/dev/null; then kill -9 $pid 2>/dev/null; fi; \
+        done";
+    let mut cmd = new_hidden_command(adb_bin);
+    if let Some(s) = serial {
+        cmd.args(["-s", s]);
+    }
+    let _ = cmd
+        .args(["shell", kill_script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Locates the `adb` executable on system `PATH` or inside standard Android SDK directories.
+pub fn locate_adb_binary() -> Result<PathBuf, UsbCheckError> {
+    // 1. Check `adb` on system PATH
+    if let Ok(out) = new_hidden_command("adb").arg("version").output() {
+        if out.status.success() {
+            return Ok(PathBuf::from("adb"));
+        }
+    }
+
+    // 2. Check ANDROID_HOME / ANDROID_SDK_ROOT / LOCALAPPDATA / HOME
+    let mut sdk_roots = Vec::new();
+    if let Ok(h) = env::var("ANDROID_HOME") {
+        sdk_roots.push(PathBuf::from(h));
+    }
+    if let Ok(r) = env::var("ANDROID_SDK_ROOT") {
+        sdk_roots.push(PathBuf::from(r));
+    }
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        sdk_roots.push(PathBuf::from(local_app_data).join("Android").join("Sdk"));
+    }
+    if let Ok(home) = env::var("HOME") {
+        sdk_roots.push(PathBuf::from(&home).join("Android").join("Sdk"));
+        sdk_roots.push(
+            PathBuf::from(&home)
+                .join("Library")
+                .join("Android")
+                .join("sdk"),
+        );
+    }
+
+    let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
+    for root in sdk_roots {
+        let candidate = root.join("platform-tools").join(exe_name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(UsbCheckError::AdbMissing(
+        "Install Android platform-tools and add adb to your system PATH".to_string(),
+    ))
+}
+
+/// Inspects `adb devices` output and returns the authorized physical USB device serial, or a specific
+/// [`UsbCheckError`] distinguishing `NoDevice`, `Unauthorized`, and `Offline`.
+pub fn check_usb_device(adb_bin: &Path) -> Result<String, UsbCheckError> {
+    let out = new_hidden_command(adb_bin)
+        .arg("devices")
+        .output()
+        .map_err(|e| UsbCheckError::Other(format!("Failed to run `adb devices`: {}", e)))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(UsbCheckError::Other(format!(
+            "`adb devices` exited with error: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_adb_devices_output(&stdout)
+}
+
+/// Parses `adb devices` output strictly for physical USB transports.
+/// Any network/TCP transport (`serial.contains(':')` or mDNS TLS service) is completely ignored
+/// so stale network ADB entries can never hijack USB auto-connect or mask USB authorization prompts.
+fn parse_adb_devices_output(stdout: &str) -> Result<String, UsbCheckError> {
+    let mut usb_ready: Option<String> = None;
+    let mut usb_unauthorized: Option<String> = None;
+    let mut usb_offline: Option<String> = None;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("List of devices")
+        {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let serial = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let state = match parts.next() {
+            Some(st) => st,
+            None => continue,
+        };
