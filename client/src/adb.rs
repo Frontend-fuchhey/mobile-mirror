@@ -152,3 +152,157 @@ pub struct UsbAutoConnector {
     quality: Arc<Mutex<StreamQualityConfig>>,
     worker: Option<JoinHandle<()>>,
     last_headline: String,
+    last_subtext: String,
+    last_is_connecting: bool,
+    last_is_warning: bool,
+    last_device_serial: Option<String>,
+}
+
+impl UsbAutoConnector {
+    /// Spawns the `"usb-auto-connector"` background thread for the specified TCP stream port.
+    pub fn new(port: u16) -> Self {
+        Self::new_with_config(port, StreamQualityConfig::default(), true)
+    }
+
+    /// Spawns `"usb-auto-connector"` with custom initial quality and auto-connect preference.
+    pub fn new_with_config(
+        port: u16,
+        initial_quality: StreamQualityConfig,
+        initial_auto_connect: bool,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_bg = Arc::clone(&running);
+        let auto_connect = Arc::new(AtomicBool::new(initial_auto_connect));
+        let auto_connect_bg = Arc::clone(&auto_connect);
+        let manual_trigger = Arc::new(AtomicBool::new(false));
+        let manual_trigger_bg = Arc::clone(&manual_trigger);
+        let quality = Arc::new(Mutex::new(initial_quality));
+        let quality_bg = Arc::clone(&quality);
+
+        let initial_headline = "Connect your phone via USB".to_string();
+        let initial_subtext =
+            "Make sure USB debugging is enabled on your Android device.".to_string();
+
+        let _ = tx.send(UsbStatus::WaitingForUsb {
+            headline: initial_headline.clone(),
+            subtext: initial_subtext.clone(),
+            is_warning: false,
+            device_serial: None,
+        });
+
+        let worker = thread::Builder::new()
+            .name("usb-auto-connector".to_string())
+            .spawn(move || {
+                let mut last_waiting: Option<(String, String, bool, Option<String>)> = None;
+
+                while running_bg.load(Ordering::Relaxed) {
+                    let triggered = manual_trigger_bg.swap(false, Ordering::SeqCst);
+                    let should_connect = triggered || auto_connect_bg.load(Ordering::Relaxed);
+
+                    // 1. Fast non-intrusive probe for `adb` + physical USB device
+                    let probe = locate_adb_binary().and_then(|adb| check_usb_device(&adb));
+
+                    match probe {
+                        Ok(serial) => {
+                            if !should_connect {
+                                let headline = format!("Device Ready ({})", serial);
+                                let subtext =
+                                    "USB device detected — click 'Start Mirroring' to begin."
+                                        .to_string();
+                                let current =
+                                    (headline.clone(), subtext.clone(), false, Some(serial.clone()));
+                                if last_waiting.as_ref() != Some(&current) {
+                                    let _ = tx.send(UsbStatus::WaitingForUsb {
+                                        headline,
+                                        subtext,
+                                        is_warning: false,
+                                        device_serial: Some(serial),
+                                    });
+                                    last_waiting = Some(current);
+                                }
+                            } else {
+                                let q = quality_bg
+                                    .lock()
+                                    .map(|g| *g)
+                                    .unwrap_or_default();
+
+                                let _ = tx.send(UsbStatus::Connecting {
+                                    headline: "Connecting to Android phone\u{2026}".to_string(),
+                                    subtext: "Starting low-latency hardware video stream over USB"
+                                        .to_string(),
+                                });
+
+                                let pipeline_res =
+                                    AdbSessionGuard::start_wired_pipeline_with_quality(
+                                        port,
+                                        q,
+                                        Some(&running_bg),
+                                        |step_msg| {
+                                            let _ = tx.send(UsbStatus::Connecting {
+                                                headline: "Connecting to Android phone\u{2026}"
+                                                    .to_string(),
+                                                subtext: step_msg.to_string(),
+                                            });
+                                        },
+                                    );
+
+                                if !running_bg.load(Ordering::Relaxed) {
+                                    break;
+                                }
+
+                                match pipeline_res {
+                                    Ok((reader, guard)) => {
+                                        let _ = tx.send(UsbStatus::Connected(reader, guard));
+                                        // Mission accomplished: exit auto-connect worker cleanly.
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        eprintln!(
+                                            "[USB Auto-Connect] Pipeline retry needed: {}",
+                                            err
+                                        );
+                                        let headline = err.headline();
+                                        let subtext = err.subtext();
+                                        let is_warning = err.is_warning();
+                                        let _ = tx.send(UsbStatus::WaitingForUsb {
+                                            headline: headline.clone(),
+                                            subtext: subtext.clone(),
+                                            is_warning,
+                                            device_serial: None,
+                                        });
+                                        last_waiting = Some((headline, subtext, is_warning, None));
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let headline = err.headline();
+                            let subtext = if matches!(err, UsbCheckError::NoDevice) {
+                                "Make sure USB debugging is enabled on your Android device."
+                                    .to_string()
+                            } else {
+                                err.subtext()
+                            };
+                            let is_warning = err.is_warning();
+                            let current = (headline.clone(), subtext.clone(), is_warning, None);
+
+                            if triggered || last_waiting.as_ref() != Some(&current) {
+                                let _ = tx.send(UsbStatus::WaitingForUsb {
+                                    headline,
+                                    subtext,
+                                    is_warning,
+                                    device_serial: None,
+                                });
+                                last_waiting = Some(current);
+                            }
+                        }
+                    }
+
+                    // Sleep in responsive 100ms slices (~800ms total) so manual triggers and
+                    // quitting respond within <100ms.
+                    for _ in 0..8 {
+                        if !running_bg.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if manual_trigger_bg.load(Ordering::Relaxed) {
