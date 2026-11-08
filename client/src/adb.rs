@@ -614,3 +614,157 @@ impl AdbSessionGuard {
         }
 
         // Wrap immediately in `AdbSessionGuard` so any early return or cancellation automatically
+        // kills `daemon_child`, removes `adb forward`, and cleans up the remote `app_process`.
+        let mut guard = Self {
+            adb_bin: adb_bin.clone(),
+            serial: serial.clone(),
+            port,
+            daemon_child: Some(child),
+            cleanup_done: false,
+        };
+
+        // Step 5: Poll/connect `StreamReader` up to ~8 seconds, checking `daemon_child.try_wait()`
+        // on every iteration so early exits report the exact root cause immediately.
+        on_status("Synchronizing 60 FPS video stream\u{2026}");
+        thread::sleep(Duration::from_millis(200));
+
+        let sock_addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut last_conn_err = String::from("Timed out waiting for stream header");
+
+        while Instant::now() < deadline {
+            if is_cancelled(running) {
+                return Err(UsbCheckError::Other("Connection cancelled".to_string()));
+            }
+
+            if let Some(ref mut proc) = guard.daemon_child {
+                match proc.try_wait() {
+                    Ok(Some(status)) => {
+                        thread::sleep(Duration::from_millis(60));
+                        if let Err(dev_err) = check_usb_device(&adb_bin) {
+                            return Err(dev_err);
+                        }
+                        let tail = format_recent_logs(&recent_logs);
+                        let msg = if tail.is_empty() {
+                            format!("Android capture server exited early ({})", status)
+                        } else {
+                            format!("Android capture server exited early ({}): {}", status, tail)
+                        };
+                        return Err(UsbCheckError::Other(msg));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(UsbCheckError::Other(format!(
+                            "Failed monitoring `app_process` daemon: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            match TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
+                Ok(stream) => match StreamReader::from_tcp_stream(stream) {
+                    Ok(reader) => {
+                        println!(
+                            "[ADB] Stream connected ({}x{}, framed={}) on 127.0.0.1:{}",
+                            reader.header().width,
+                            reader.header().height,
+                            reader.header().framed,
+                            port
+                        );
+                        return Ok((reader, guard));
+                    }
+                    Err(e) => {
+                        last_conn_err = e.to_string();
+                    }
+                },
+                Err(e) => {
+                    last_conn_err = e.to_string();
+                    if e.kind() == ErrorKind::ConnectionRefused {
+                        let _ = new_hidden_command(&adb_bin)
+                            .args(["-s", &serial, "forward", &forward_spec, &forward_spec])
+                            .output();
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(150));
+        }
+
+        if let Err(dev_err) = check_usb_device(&adb_bin) {
+            return Err(dev_err);
+        }
+
+        let tail = format_recent_logs(&recent_logs);
+        let detail = if tail.is_empty() {
+            format!(
+                "Timed out connecting to 127.0.0.1:{} ({})",
+                port, last_conn_err
+            )
+        } else {
+            format!(
+                "Timed out connecting to 127.0.0.1:{} ({}) — {}",
+                port, last_conn_err, tail
+            )
+        };
+        Err(UsbCheckError::Other(detail))
+    }
+
+    pub fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn is_server_alive(&mut self) -> bool {
+        match self.daemon_child {
+            Some(ref mut child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+}
+
+impl Drop for AdbSessionGuard {
+    fn drop(&mut self) {
+        if self.cleanup_done {
+            return;
+        }
+        self.cleanup_done = true;
+
+        println!(
+            "[ADB] Cleaning up USB ADB session (device {}, port {})...",
+            self.serial, self.port
+        );
+
+        // 1. Terminate local `adb shell` process immediately (<1ms local OS operation)
+        if let Some(ref mut child) = self.daemon_child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        // 2. Offload `adb forward --remove` and remote `app_process` cleanup onto a detached
+        // background thread so dropping `AdbSessionGuard` on the SDL3 UI thread never blocks
+        // even if `adbd` stalls during a sudden physical USB cable unplug.
+        let adb_path = self.adb_bin.clone();
+        let serial = self.serial.clone();
+        let port = self.port;
+
+        let spawn_res = thread::Builder::new()
+            .name("adb-cleanup".to_string())
+            .spawn(move || {
+                let _ = new_hidden_command(&adb_path)
+                    .args([
+                        "-s",
+                        &serial,
+                        "forward",
+                        "--remove",
+                        &format!("tcp:{}", port),
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                kill_remote_server(&adb_path, Some(&serial));
+            });
+
