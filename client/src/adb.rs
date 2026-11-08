@@ -922,3 +922,158 @@ fn parse_adb_devices_output(stdout: &str) -> Result<String, UsbCheckError> {
             Some(st) => st,
             None => continue,
         };
+
+        // Strictly ignore network/TCP transports (`ip:port` or mDNS `._adb-tls-`)
+        if serial.contains(':') || serial.contains("._adb-tls-") {
+            continue;
+        }
+
+        match state {
+            "device" => {
+                if usb_ready.is_none() {
+                    usb_ready = Some(serial.to_string());
+                }
+            }
+            "unauthorized" => {
+                if usb_unauthorized.is_none() {
+                    usb_unauthorized = Some(serial.to_string());
+                }
+            }
+            "offline" => {
+                if usb_offline.is_none() {
+                    usb_offline = Some(serial.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(serial) = usb_ready {
+        return Ok(serial);
+    }
+    if let Some(serial) = usb_unauthorized {
+        return Err(UsbCheckError::Unauthorized(serial));
+    }
+    if let Some(serial) = usb_offline {
+        return Err(UsbCheckError::Offline(serial));
+    }
+    Err(UsbCheckError::NoDevice)
+}
+
+pub fn locate_artifact_file(relative_path: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join(relative_path));
+        candidates.push(cwd.join("..").join(relative_path));
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(relative_path));
+            candidates.push(dir.join("..").join(relative_path));
+            candidates.push(dir.join("..").join("..").join(relative_path));
+            candidates.push(dir.join("..").join("..").join("..").join(relative_path));
+        }
+    }
+    let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(parent) = manifest_root.parent() {
+        candidates.push(parent.join(relative_path));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn locate_or_build_server_jar() -> Result<PathBuf, String> {
+    if let Some(jar) = locate_artifact_file("server/server.jar") {
+        return Ok(jar);
+    }
+
+    // Attempt to build server.jar automatically if missing
+    if cfg!(windows) {
+        if let Some(build_script) = locate_artifact_file("server/build.ps1") {
+            let status = new_hidden_command("powershell")
+                .args([
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    &build_script.to_string_lossy(),
+                ])
+                .status()
+                .map_err(|e| format!("Failed to invoke server/build.ps1: {}", e))?;
+            if status.success() {
+                if let Some(jar) = locate_artifact_file("server/server.jar") {
+                    return Ok(jar);
+                }
+            }
+        }
+    } else if let Some(build_script) = locate_artifact_file("server/build.sh") {
+        let status = Command::new("sh")
+            .arg(&build_script)
+            .status()
+            .map_err(|e| format!("Failed to invoke server/build.sh: {}", e))?;
+        if status.success() {
+            if let Some(jar) = locate_artifact_file("server/server.jar") {
+                return Ok(jar);
+            }
+        }
+    }
+
+    Err(
+        "Could not find `server/server.jar`. Run `server/build.ps1` to compile the Android server."
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_adb_devices_strict_usb_only() {
+        let empty = "* daemon not running; starting now at tcp:5037\n\
+                     * daemon started successfully\n\
+                     List of devices attached\n\n";
+        assert_eq!(parse_adb_devices_output(empty), Err(UsbCheckError::NoDevice));
+
+        let unauth = "List of devices attached\nR58N123456A\tunauthorized\n";
+        assert_eq!(
+            parse_adb_devices_output(unauth),
+            Err(UsbCheckError::Unauthorized("R58N123456A".to_string()))
+        );
+
+        let offline = "List of devices attached\nR58N123456A\toffline\n";
+        assert_eq!(
+            parse_adb_devices_output(offline),
+            Err(UsbCheckError::Offline("R58N123456A".to_string()))
+        );
+
+        // Stale network `ip:port` entry in `device` state alone must return NoDevice
+        let tcp_only_ready = "List of devices attached\n192.168.1.50:5555\tdevice\n";
+        assert_eq!(
+            parse_adb_devices_output(tcp_only_ready),
+            Err(UsbCheckError::NoDevice)
+        );
+
+        // Stale network `ip:port` entry in `device` state alongside physical USB `unauthorized`
+        // must NOT hijack auto-connect and must surface the USB `Unauthorized` prompt!
+        let tcp_and_usb_unauth =
+            "List of devices attached\n192.168.1.50:5555\tdevice\nR58M123456\tunauthorized\n";
+        assert_eq!(
+            parse_adb_devices_output(tcp_and_usb_unauth),
+            Err(UsbCheckError::Unauthorized("R58M123456".to_string()))
+        );
+
+        // Stale network `ip:port` offline entry must NOT mask NoDevice when unplugged
+        let stale_tcp_offline = "List of devices attached\n192.168.1.50:5555\toffline\n";
+        assert_eq!(
+            parse_adb_devices_output(stale_tcp_offline),
+            Err(UsbCheckError::NoDevice)
+        );
+
+        // Physical USB serial connects cleanly even if a TCP entry is also listed
+        let both_ready =
+            "List of devices attached\n192.168.1.50:5555\tdevice\nR58N123456A\tdevice\n";
+        assert_eq!(
+            parse_adb_devices_output(both_ready),
+            Ok("R58N123456A".to_string())
+        );
+    }
+}
