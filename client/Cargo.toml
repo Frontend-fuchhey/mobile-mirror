@@ -9,6 +9,9 @@ default = []
 # Enable compile-time static/import-lib linking when FFmpeg and SDL3 SDKs are configured via FFMPEG_LIB_DIR / SDL3_LIB_DIR
 link-system-libs = []
 
+[dependencies]
+ab_glyph = "0.2"
+
 [[bin]]
 name = "mobile-mirror-client"
 path = "src/main.rs"
