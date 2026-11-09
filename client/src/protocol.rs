@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 3/4
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -371,3 +370,128 @@ fn find_next_annexb_unit_boundary(buf: &[u8]) -> Option<usize> {
                 None
             };
             if let Some(hdr_idx) = next_hdr_idx {
+                if hdr_idx < buf.len() {
+                    let next_type = buf[hdr_idx] & 0x1F;
+                    // Group consecutive SPS (7) + PPS (8) NALs into a single codec config packet
+                    if first_is_config && (next_type == 7 || next_type == 8) {
+                        i = hdr_idx;
+                        continue;
+                    }
+                    return Some(i);
+                } else {
+                    return None;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn classify_annexb_payload(data: &[u8]) -> (bool, bool) {
+    let mut has_config = false;
+    let mut has_idr = false;
+    let mut has_slice = false;
+    for nal in split_annexb_nals(data) {
+        if let Some(&header) = nal.first() {
+            match header & 0x1F {
+                7 | 8 => has_config = true,
+                5 => {
+                    has_idr = true;
+                    has_slice = true;
+                }
+                1 => has_slice = true,
+                _ => {}
+            }
+        }
+    }
+    (has_config && !has_slice, has_idr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_framed_stream_parsing() {
+        let mut wire = Vec::new();
+        // 12-byte stream header
+        wire.extend_from_slice(&CODEC_ID_H264.to_be_bytes());
+        wire.extend_from_slice(&1920u32.to_be_bytes());
+        wire.extend_from_slice(&1080u32.to_be_bytes());
+
+        // Packet 1: SPS/PPS config packet
+        let config_nal = b"\x00\x00\x00\x01\x67\x42\x00\x1f\x00\x00\x00\x01\x68\xce\x3c\x80";
+        wire.extend_from_slice(&PACKET_FLAG_CONFIG.to_be_bytes());
+        wire.extend_from_slice(&(config_nal.len() as u32).to_be_bytes());
+        wire.extend_from_slice(config_nal);
+
+        // Packet 2: IDR keyframe at PTS=16667us
+        let idr_nal = b"\x00\x00\x00\x01\x65\x88\x84\x21";
+        let pts_flags = PACKET_FLAG_KEY_FRAME | 16_667;
+        wire.extend_from_slice(&pts_flags.to_be_bytes());
+        wire.extend_from_slice(&(idr_nal.len() as u32).to_be_bytes());
+        wire.extend_from_slice(idr_nal);
+
+        let mut reader = StreamReader::new(Cursor::new(wire)).unwrap();
+        assert_eq!(reader.header().width, 1920);
+        assert_eq!(reader.header().height, 1080);
+        assert!(reader.header().framed);
+
+        let pkt1 = reader.next_packet().unwrap().unwrap();
+        assert!(pkt1.is_config);
+        assert!(!pkt1.is_keyframe);
+        let (sps, pps) = extract_sps_pps(&pkt1.payload);
+        assert_eq!(sps.unwrap(), vec![0x67, 0x42, 0x00, 0x1f]);
+        assert_eq!(pps.unwrap(), vec![0x68, 0xce, 0x3c, 0x80]);
+
+        let pkt2 = reader.next_packet().unwrap().unwrap();
+        assert!(!pkt2.is_config);
+        assert!(pkt2.is_keyframe);
+        assert_eq!(pkt2.pts_us, 16_667);
+        assert_eq!(&*pkt2.payload, idr_nal);
+
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_raw_annexb_stream_grouping() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let sender = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(addr).unwrap();
+            // Send raw Annex-B SPS + PPS + IDR + P-frame over direct TCP (no 12-byte header)
+            let raw_stream = b"\x00\x00\x00\x01\x67\x42\x00\x1f\
+                               \x00\x00\x00\x01\x68\xce\x3c\x80\
+                               \x00\x00\x00\x01\x65\x88\x84\x21\
+                               \x00\x00\x00\x01\x41\x9a\x22\x11";
+            client.write_all(raw_stream).unwrap();
+        });
+
+        let (accepted, _) = listener.accept().unwrap();
+        let mut reader = StreamReader::from_tcp_stream(accepted).unwrap();
+        assert!(!reader.header().framed);
+
+        // Packet 1 should group both SPS (7) and PPS (8) into one config packet
+        let pkt_cfg = reader.next_packet().unwrap().unwrap();
+        assert!(pkt_cfg.is_config);
+        let (sps, pps) = extract_sps_pps(&pkt_cfg.payload);
+        assert_eq!(sps.unwrap(), vec![0x67, 0x42, 0x00, 0x1f]);
+        assert_eq!(pps.unwrap(), vec![0x68, 0xce, 0x3c, 0x80]);
+
+        // Packet 2 should be the IDR keyframe
+        let pkt_idr = reader.next_packet().unwrap().unwrap();
+        assert!(pkt_idr.is_keyframe);
+        assert!(!pkt_idr.is_config);
+
+        // Packet 3 should be the non-IDR P-frame
+        let pkt_p = reader.next_packet().unwrap().unwrap();
+        assert!(!pkt_p.is_keyframe);
+        assert!(!pkt_p.is_config);
+
+        sender.join().unwrap();
+    }
+}
