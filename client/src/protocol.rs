@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 1/4
+// [Mobile Mirror] Progressive implementation phase 2/4
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -123,3 +123,127 @@ impl<R: Read> StreamReader<R> {
             Ok(Self {
                 reader,
                 header: StreamHeader {
+                    codec_id: magic,
+                    width,
+                    height,
+                    framed: true,
+                },
+                raw_buffer: Vec::new(),
+                synthetic_pts_us: 0,
+                control_stream: None,
+            })
+        } else {
+            // Raw Annex-B stream mode: seed the internal buffer with the first 4 bytes
+            let mut raw_buffer = Vec::with_capacity(256 * 1024);
+            raw_buffer.extend_from_slice(&first4);
+            Ok(Self {
+                reader,
+                header: StreamHeader {
+                    codec_id: CODEC_ID_H264,
+                    width: 1080,
+                    height: 2400,
+                    framed: false,
+                },
+                raw_buffer,
+                synthetic_pts_us: 0,
+                control_stream: None,
+            })
+        }
+    }
+
+    pub fn header(&self) -> StreamHeader {
+        self.header
+    }
+
+    /// Reads the next H.264 NAL packet from the socket.
+    /// Returns `Ok(None)` on clean EOF.
+    pub fn next_packet(&mut self) -> io::Result<Option<Arc<NalPacket>>> {
+        if self.header.framed {
+            self.read_framed_packet()
+        } else {
+            self.read_raw_annexb_packet()
+        }
+    }
+
+    fn read_framed_packet(&mut self) -> io::Result<Option<Arc<NalPacket>>> {
+        let mut meta = [0u8; 12];
+        match read_exact_or_eof(&mut self.reader, &mut meta)? {
+            false => return Ok(None),
+            true => {}
+        }
+
+        let pts_and_flags = u64::from_be_bytes([
+            meta[0], meta[1], meta[2], meta[3], meta[4], meta[5], meta[6], meta[7],
+        ]);
+        let size = u32::from_be_bytes([meta[8], meta[9], meta[10], meta[11]]) as usize;
+
+        if size == 0 || size > 64 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid NAL packet size: {} bytes", size),
+            ));
+        }
+
+        let mut buf = vec![0u8; size];
+        self.reader.read_exact(&mut buf)?;
+
+        let is_config = (pts_and_flags & PACKET_FLAG_CONFIG) != 0;
+        let is_keyframe = (pts_and_flags & PACKET_FLAG_KEY_FRAME) != 0;
+        let is_audio = (pts_and_flags & PACKET_FLAG_AUDIO) != 0;
+        let pts_us = if is_config {
+            0
+        } else {
+            pts_and_flags & PTS_MASK
+        };
+
+        Ok(Some(Arc::new(NalPacket {
+            pts_us,
+            is_config,
+            is_keyframe,
+            is_audio,
+            payload: Arc::from(buf),
+            received_at: Instant::now(),
+        })))
+    }
+
+    fn read_raw_annexb_packet(&mut self) -> io::Result<Option<Arc<NalPacket>>> {
+        let mut temp = [0u8; 32 * 1024];
+        loop {
+            if let Some(split_idx) = find_next_annexb_unit_boundary(&self.raw_buffer) {
+                let unit: Vec<u8> = self.raw_buffer.drain(..split_idx).collect();
+                let (is_config, is_keyframe) = classify_annexb_payload(&unit);
+                let pts_us = if is_config {
+                    0
+                } else {
+                    let pts = self.synthetic_pts_us;
+                    self.synthetic_pts_us += 16_667; // 60 FPS (16.667 ms)
+                    pts
+                };
+                return Ok(Some(Arc::new(NalPacket {
+                    pts_us,
+                    is_config,
+                    is_keyframe,
+                    is_audio: false,
+                    payload: Arc::from(unit),
+                    received_at: Instant::now(),
+                })));
+            }
+
+            let n = self.reader.read(&mut temp)?;
+            if n == 0 {
+                if self.raw_buffer.is_empty() {
+                    return Ok(None);
+                }
+                let unit: Vec<u8> = self.raw_buffer.drain(..).collect();
+                let (is_config, is_keyframe) = classify_annexb_payload(&unit);
+                let pts_us = if is_config { 0 } else { self.synthetic_pts_us };
+                return Ok(Some(Arc::new(NalPacket {
+                    pts_us,
+                    is_config,
+                    is_keyframe,
+                    is_audio: false,
+                    payload: Arc::from(unit),
+                    received_at: Instant::now(),
+                })));
+            }
+            self.raw_buffer.extend_from_slice(&temp[..n]);
