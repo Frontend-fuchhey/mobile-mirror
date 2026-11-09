@@ -200,3 +200,104 @@ impl AppSettings {
                 let key = k.trim();
                 let val = v.trim();
                 match key {
+                    "quality" => s.quality = MirrorQuality::from_str_lossy(val),
+                    "target_fps" => {
+                        if let Ok(n) = val.parse::<u32>() {
+                            s.target_fps = n.clamp(15, 144);
+                        }
+                    }
+                    "bitrate_mbps" => {
+                        if let Ok(n) = val.parse::<u32>() {
+                            s.bitrate_mbps = n.clamp(2, 50);
+                        }
+                    }
+                    "cbr_mode" => s.cbr_mode = val.eq_ignore_ascii_case("true"),
+                    "mic_enabled" => s.mic_enabled = val.eq_ignore_ascii_case("true"),
+                    "pc_audio_enabled" => s.pc_audio_enabled = val.eq_ignore_ascii_case("true"),
+                    "auto_connect_usb" => s.auto_connect_usb = val.eq_ignore_ascii_case("true"),
+                    "auto_record" => s.auto_record = val.eq_ignore_ascii_case("true"),
+                    "always_on_top" => s.always_on_top = val.eq_ignore_ascii_case("true"),
+                    "hw_backend" => s.hw_backend = HwBackendPref::from_opt_str(Some(val)),
+                    "fullscreen_mirror" => s.fullscreen_mirror = val.eq_ignore_ascii_case("true"),
+                    _ => {}
+                }
+            }
+        }
+        s
+    }
+
+    pub fn save(&self, record_dir: &Path) {
+        let _ = fs::create_dir_all(record_dir);
+        let path = Self::settings_file_path(record_dir);
+        let data = format!(
+            "# Mobile Mirror Persistent Settings\n\
+             quality={}\n\
+             target_fps={}\n\
+             bitrate_mbps={}\n\
+             cbr_mode={}\n\
+             mic_enabled={}\n\
+             pc_audio_enabled={}\n\
+             auto_connect_usb={}\n\
+             auto_record={}\n\
+             always_on_top={}\n\
+             hw_backend={}\n\
+             fullscreen_mirror={}\n",
+            self.quality.label(),
+            self.target_fps,
+            self.bitrate_mbps,
+            self.cbr_mode,
+            self.mic_enabled,
+            self.pc_audio_enabled,
+            self.auto_connect_usb,
+            self.auto_record,
+            self.always_on_top,
+            self.hw_backend.cli_value().unwrap_or("auto"),
+            self.fullscreen_mirror,
+        );
+        let _ = fs::write(path, data);
+    }
+}
+
+/// Metadata for a saved `.mp4` recording displayed in the `Recordings` tab.
+#[derive(Debug, Clone)]
+pub struct RecordingEntry {
+    pub file_name: String,
+    pub full_path: PathBuf,
+    pub size_bytes: u64,
+    pub modified_epoch_secs: u64,
+}
+
+impl RecordingEntry {
+    pub fn formatted_size(&self) -> String {
+        let mb = self.size_bytes as f64 / (1024.0 * 1024.0);
+        if mb >= 1.0 {
+            format!("{:.1} MB", mb)
+        } else {
+            let kb = (self.size_bytes as f64 / 1024.0).max(1.0);
+            format!("{:.0} KB", kb)
+        }
+    }
+}
+
+/// Scans `record_dir` for `.mp4` files sorted newest-first.
+pub fn scan_recordings(record_dir: &Path) -> Vec<RecordingEntry> {
+    let mut entries = Vec::new();
+    let Ok(read_dir) = fs::read_dir(record_dir) else {
+        return entries;
+    };
+    for item in read_dir.flatten() {
+        let path = item.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_mp4 = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("mp4"))
+            .unwrap_or(false);
+        if !is_mp4 {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
