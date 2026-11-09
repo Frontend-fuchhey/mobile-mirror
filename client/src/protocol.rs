@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 2/4
+// [Mobile Mirror] Progressive implementation phase 3/4
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -247,3 +247,127 @@ impl<R: Read> StreamReader<R> {
                 })));
             }
             self.raw_buffer.extend_from_slice(&temp[..n]);
+        }
+    }
+}
+
+fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<bool> {
+    let mut read = 0;
+    while read < buf.len() {
+        match reader.read(&mut buf[read..]) {
+            Ok(0) => {
+                if read == 0 {
+                    return Ok(false);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Unexpected EOF in packet header",
+                ));
+            }
+            Ok(n) => read += n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Scans an Annex-B byte buffer for individual NAL units (without start codes).
+pub fn split_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
+    let mut nals = Vec::new();
+    let mut starts = Vec::new();
+
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 {
+            if data[i + 2] == 1 {
+                starts.push((i, i + 3));
+                i += 3;
+                continue;
+            } else if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
+                starts.push((i, i + 4));
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    for idx in 0..starts.len() {
+        let payload_start = starts[idx].1;
+        let payload_end = if idx + 1 < starts.len() {
+            starts[idx + 1].0
+        } else {
+            data.len()
+        };
+        if payload_start < payload_end {
+            nals.push(&data[payload_start..payload_end]);
+        }
+    }
+    nals
+}
+
+/// Extracts SPS (NAL type 7) and PPS (NAL type 8) from an Annex-B buffer.
+pub fn extract_sps_pps(data: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let mut sps = None;
+    let mut pps = None;
+    for nal in split_annexb_nals(data) {
+        if nal.is_empty() {
+            continue;
+        }
+        let nal_type = nal[0] & 0x1F;
+        if nal_type == 7 && sps.is_none() {
+            sps = Some(nal.to_vec());
+        } else if nal_type == 8 && pps.is_none() {
+            pps = Some(nal.to_vec());
+        }
+    }
+    (sps, pps)
+}
+
+/// Converts Annex-B start-code prefixed NAL units into 4-byte big-endian length-prefixed AVCC format
+/// suitable for MP4 `mdat` sample payloads (filtering out SPS/PPS config NALs if desired).
+pub fn annexb_to_avcc_sample(data: &[u8]) -> Vec<u8> {
+    let nals = split_annexb_nals(data);
+    let mut out = Vec::with_capacity(data.len() + 16);
+    for nal in nals {
+        if nal.is_empty() {
+            continue;
+        }
+        let nal_type = nal[0] & 0x1F;
+        // Skip SPS (7) and PPS (8) in sample data when stored in avcC box
+        if nal_type == 7 || nal_type == 8 {
+            continue;
+        }
+        out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        out.extend_from_slice(nal);
+    }
+    out
+}
+
+fn first_nal_type(buf: &[u8]) -> Option<u8> {
+    if buf.len() >= 4 && buf[0] == 0 && buf[1] == 0 && buf[2] == 1 {
+        Some(buf[3] & 0x1F)
+    } else if buf.len() >= 5 && buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 1 {
+        Some(buf[4] & 0x1F)
+    } else {
+        None
+    }
+}
+
+fn find_next_annexb_unit_boundary(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 8 {
+        return None;
+    }
+    let first_is_config = matches!(first_nal_type(buf), Some(7 | 8));
+    let mut i = 4;
+    while i + 4 <= buf.len() {
+        if buf[i] == 0 && buf[i + 1] == 0 {
+            let next_hdr_idx = if buf[i + 2] == 1 {
+                Some(i + 3)
+            } else if buf[i + 2] == 0 && buf[i + 3] == 1 {
+                Some(i + 4)
+            } else {
+                None
+            };
+            if let Some(hdr_idx) = next_hdr_idx {
