@@ -301,3 +301,104 @@ pub fn scan_recordings(record_dir: &Path) -> Vec<RecordingEntry> {
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
+            .unwrap_or("recording.mp4")
+            .to_string();
+        let meta = fs::metadata(&path).ok();
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified_epoch_secs = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        entries.push(RecordingEntry {
+            file_name,
+            full_path: path,
+            size_bytes,
+            modified_epoch_secs,
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.modified_epoch_secs
+            .cmp(&a.modified_epoch_secs)
+            .then_with(|| b.file_name.cmp(&a.file_name))
+    });
+    entries
+}
+
+/// Opens the `recordings/` directory in the OS file manager (Windows Explorer).
+pub fn open_folder_in_explorer(dir: &Path) {
+    let _ = fs::create_dir_all(dir);
+    let abs = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // Strip Windows UNC `\\?\` prefix if present so explorer.exe handles it cleanly
+    let clean_str = abs
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    #[cfg(windows)]
+    {
+        let _ = Command::new("explorer.exe").arg(&clean_str).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(&clean_str).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(&clean_str).spawn();
+    }
+}
+
+/// Opens/plays a specific `.mp4` recording file in the system default media player.
+pub fn open_media_file(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let abs = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let clean_str = abs
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "", &clean_str])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(&clean_str).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(&clean_str).spawn();
+    }
+}
+
+/// Reveals/highlights a specific `.mp4` recording file inside Windows Explorer.
+pub fn reveal_file_in_explorer(path: &Path) {
+    if !path.exists() {
+        if let Some(p) = path.parent() {
+            open_folder_in_explorer(p);
+        }
+        return;
+    }
+    let abs = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let clean_str = abs
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    #[cfg(windows)]
+    {
+        let _ = Command::new("explorer.exe")
+            .arg(format!("/select,{}", clean_str))
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(p) = path.parent() {
+            open_folder_in_explorer(p);
+        }
+    }
+}
