@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 5/8
+// [Mobile Mirror] Progressive implementation phase 6/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -245,3 +245,52 @@ impl HwDecoder {
             loop {
                 (self.api.av_frame_unref)(self.recv_frame);
                 let recv_ret = (self.api.avcodec_receive_frame)(self.codec_ctx, self.recv_frame);
+                if recv_ret == AVERROR_EAGAIN || recv_ret == AVERROR_EOF {
+                    break;
+                }
+                if recv_ret < 0 {
+                    return Err(format!("avcodec_receive_frame error: {}", recv_ret));
+                }
+
+                (self.api.av_frame_unref)(self.raw_frame);
+                std::mem::swap(&mut self.raw_frame, &mut self.recv_frame);
+                self.has_frame = true;
+                self.sw_frame_valid = false;
+                decoded_any = true;
+            }
+            Ok(decoded_any)
+        }
+    }
+
+    /// Invokes `on_frame` with a zero-copy view of the latest decoded video frame.
+    /// Hardware-decoded surfaces (`D3D11VA`, `DXVA2`, `CUDA`) are transferred via
+    /// `av_hwframe_transfer_data` only once for the freshest frame in a batch.
+    pub fn with_current_frame<F>(&mut self, mut on_frame: F) -> bool
+    where
+        F: FnMut(&DecodedFrameView<'_>),
+    {
+        if !self.has_frame {
+            return false;
+        }
+
+        unsafe {
+            let fmt = (*self.raw_frame).format;
+            let is_hw_format = (fmt != AV_PIX_FMT_YUV420P && fmt != AV_PIX_FMT_NV12)
+                || fmt == AV_PIX_FMT_CUDA
+                || fmt == AV_PIX_FMT_DXVA2_VLD
+                || fmt == AV_PIX_FMT_D3D11;
+
+            let target_frame = if is_hw_format {
+                if !self.sw_frame_valid {
+                    (self.api.av_frame_unref)(self.sw_frame);
+                    let xfer =
+                        (self.api.av_hwframe_transfer_data)(self.sw_frame, self.raw_frame, 0);
+                    if xfer < 0 {
+                        return false;
+                    }
+                    self.sw_frame_valid = true;
+                }
+                self.sw_frame
+            } else {
+                self.raw_frame
+            };
