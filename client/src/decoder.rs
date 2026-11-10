@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 6/8
+// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -294,3 +294,52 @@ impl HwDecoder {
             } else {
                 self.raw_frame
             };
+
+            let width = (*target_frame).width as u32;
+            let height = (*target_frame).height as u32;
+            if width == 0
+                || height == 0
+                || (*target_frame).data[0].is_null()
+                || (*target_frame).data[1].is_null()
+            {
+                return false;
+            }
+
+            let y_pitch = (*target_frame).linesize[0];
+            let y_len = (y_pitch.unsigned_abs() as usize) * (height as usize);
+            let y_plane = std::slice::from_raw_parts((*target_frame).data[0], y_len);
+
+            if (*target_frame).format == AV_PIX_FMT_NV12 || (*target_frame).data[2].is_null() {
+                let uv_pitch = (*target_frame).linesize[1];
+                let uv_len = (uv_pitch.unsigned_abs() as usize) * ((height as usize) / 2);
+                let uv_plane = std::slice::from_raw_parts((*target_frame).data[1], uv_len);
+
+                let view = DecodedFrameView {
+                    width,
+                    height,
+                    layout: PixelLayout::Nv12,
+                    y_plane,
+                    y_pitch,
+                    u_or_uv_plane: uv_plane,
+                    u_or_uv_pitch: uv_pitch,
+                    v_plane: None,
+                    v_pitch: 0,
+                };
+                on_frame(&view);
+                true
+            } else {
+                let u_pitch = (*target_frame).linesize[1];
+                let v_pitch = (*target_frame).linesize[2];
+                let chroma_h = (height as usize) / 2;
+                let u_len = (u_pitch.unsigned_abs() as usize) * chroma_h;
+                let v_len = (v_pitch.unsigned_abs() as usize) * chroma_h;
+                let u_plane = std::slice::from_raw_parts((*target_frame).data[1], u_len);
+                let v_plane = std::slice::from_raw_parts((*target_frame).data[2], v_len);
+
+                let view = DecodedFrameView {
+                    width,
+                    height,
+                    layout: PixelLayout::Yuv420p,
+                    y_plane,
+                    y_pitch,
+                    u_or_uv_plane: u_plane,
