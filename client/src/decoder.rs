@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 3/8
+// [Mobile Mirror] Progressive implementation phase 4/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -146,3 +146,53 @@ impl HwDecoder {
             let recv_frame = (api.av_frame_alloc)();
             let raw_frame = (api.av_frame_alloc)();
             let sw_frame = (api.av_frame_alloc)();
+            if pkt.is_null() || recv_frame.is_null() || raw_frame.is_null() || sw_frame.is_null() {
+                if !sw_frame.is_null() {
+                    let mut f = sw_frame;
+                    (api.av_frame_free)(&mut f);
+                }
+                if !raw_frame.is_null() {
+                    let mut f = raw_frame;
+                    (api.av_frame_free)(&mut f);
+                }
+                if !recv_frame.is_null() {
+                    let mut f = recv_frame;
+                    (api.av_frame_free)(&mut f);
+                }
+                if !pkt.is_null() {
+                    let mut p = pkt;
+                    (api.av_packet_free)(&mut p);
+                }
+                let mut ctx_ptr = codec_ctx;
+                (api.avcodec_free_context)(&mut ctx_ptr);
+                if !hw_device_ctx.is_null() {
+                    (api.av_buffer_unref)(&mut hw_device_ctx);
+                }
+                return Err("Failed to allocate FFmpeg AVPacket / AVFrame buffers".to_string());
+            }
+
+            println!("[Decoder] Active video decoder: {}", backend_name);
+
+            Ok(Self {
+                api,
+                codec_ctx,
+                hw_device_ctx,
+                pkt,
+                recv_frame,
+                raw_frame,
+                sw_frame,
+                has_frame: false,
+                sw_frame_valid: false,
+                backend_name,
+            })
+        }
+    }
+
+    unsafe fn try_open_codec(
+        api: &FfmpegApi,
+        codec: *const AVCodec,
+        threads: i64,
+        slice_threading: bool,
+    ) -> Option<*mut c_void> {
+        let ctx = (api.avcodec_alloc_context3)(codec);
+        if ctx.is_null() {
