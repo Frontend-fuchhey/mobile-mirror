@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -343,3 +342,53 @@ impl HwDecoder {
                     y_plane,
                     y_pitch,
                     u_or_uv_plane: u_plane,
+                    u_or_uv_pitch: u_pitch,
+                    v_plane: Some(v_plane),
+                    v_pitch,
+                };
+                on_frame(&view);
+                true
+            }
+        }
+    }
+}
+
+impl Drop for HwDecoder {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.sw_frame.is_null() {
+                (self.api.av_frame_free)(&mut self.sw_frame);
+            }
+            if !self.raw_frame.is_null() {
+                (self.api.av_frame_free)(&mut self.raw_frame);
+            }
+            if !self.recv_frame.is_null() {
+                (self.api.av_frame_free)(&mut self.recv_frame);
+            }
+            if !self.pkt.is_null() {
+                (self.api.av_packet_free)(&mut self.pkt);
+            }
+            if !self.codec_ctx.is_null() {
+                (self.api.avcodec_free_context)(&mut self.codec_ctx);
+            }
+            if !self.hw_device_ctx.is_null() {
+                (self.api.av_buffer_unref)(&mut self.hw_device_ctx);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hw_decoder_init_and_software_fallback() {
+        let auto_dec = HwDecoder::new(None).expect("HwDecoder::new(None) should succeed");
+        println!("Auto decoder backend: {}", auto_dec.backend_name());
+
+        let sw_dec =
+            HwDecoder::new(Some("software")).expect("HwDecoder::new(Some(\"software\")) failed");
+        assert_eq!(sw_dec.backend_name(), "FFmpeg H.264 Low-Delay");
+    }
+}
