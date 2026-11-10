@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 2/8
+// [Mobile Mirror] Progressive implementation phase 3/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -97,3 +97,52 @@ impl HwDecoder {
                             (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
                             (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
                         ],
+                        _ => &[
+                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                            (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                        ],
+                    };
+
+                    for &(hw_type, label) in candidates {
+                        let ret = (api.av_hwdevice_ctx_create)(
+                            &mut hw_device_ctx,
+                            hw_type,
+                            ptr::null(),
+                            ptr::null_mut(),
+                            0,
+                        );
+                        if ret == 0 && !hw_device_ctx.is_null() {
+                            backend_name = label.to_string();
+                            break;
+                        }
+                    }
+                }
+
+                let slice_threads = std::thread::available_parallelism()
+                    .map(|n| n.get().clamp(2, 4) as i64)
+                    .unwrap_or(2);
+
+                match Self::try_open_codec(&api, sw_codec, slice_threads, true) {
+                    Some(ctx) => {
+                        codec_ctx = ctx;
+                        if backend_name.is_empty() {
+                            backend_name = "FFmpeg H.264 Low-Delay".to_string();
+                        }
+                    }
+                    None => {
+                        if !hw_device_ctx.is_null() {
+                            (api.av_buffer_unref)(&mut hw_device_ctx);
+                        }
+                        return Err(
+                            "Failed to open FFmpeg H.264 Low-Delay decoder (avcodec_open2 failed)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            let pkt = (api.av_packet_alloc)();
+            let recv_frame = (api.av_frame_alloc)();
+            let raw_frame = (api.av_frame_alloc)();
+            let sw_frame = (api.av_frame_alloc)();
