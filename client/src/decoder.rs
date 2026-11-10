@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 1/8
+// [Mobile Mirror] Progressive implementation phase 2/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -48,3 +48,52 @@ pub struct HwDecoder {
 unsafe impl Send for HwDecoder {}
 
 impl HwDecoder {
+    pub fn new(preferred_hw: Option<&str>) -> Result<Self, String> {
+        let api = FfmpegApi::load()?;
+
+        let pref = preferred_hw
+            .unwrap_or("auto")
+            .trim()
+            .to_ascii_lowercase();
+        let force_software = matches!(pref.as_str(), "cpu" | "sw" | "software");
+
+        unsafe {
+            let mut codec_ctx: *mut c_void = ptr::null_mut();
+            let mut hw_device_ctx: *mut AVBufferRef = ptr::null_mut();
+            let mut backend_name = String::new();
+
+            // 1. Try dedicated NVIDIA NVDEC (`h264_cuvid`) when requested or in `auto` mode.
+            if !force_software && matches!(pref.as_str(), "" | "auto" | "nvdec" | "cuda") {
+                let cuvid_name = CString::new("h264_cuvid").unwrap();
+                let cuvid_codec = (api.avcodec_find_decoder_by_name)(cuvid_name.as_ptr());
+                if !cuvid_codec.is_null() {
+                    if let Some(ctx) = Self::try_open_codec(&api, cuvid_codec, 1, false) {
+                        codec_ctx = ctx;
+                        backend_name = "NVDEC (h264_cuvid)".to_string();
+                    }
+                }
+            }
+
+            // 2. Standard `AV_CODEC_ID_H264` with `D3D11VA` / `DXVA2` / `CUDA` hardware context
+            //    and automatic fallback to multi-threaded low-delay software H.264 decoding.
+            if codec_ctx.is_null() {
+                let sw_codec = (api.avcodec_find_decoder)(AV_CODEC_ID_H264);
+                if sw_codec.is_null() {
+                    return Err("Could not find H.264 decoder in libavcodec".to_string());
+                }
+
+                if !force_software {
+                    let candidates: &[(i32, &str)] = match pref.as_str() {
+                        "d3d11va" | "d3d11" => &[
+                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                        ],
+                        "dxva2" => &[
+                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                        ],
+                        "nvdec" | "cuda" => &[
+                            (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                        ],
