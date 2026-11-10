@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 4/8
+// [Mobile Mirror] Progressive implementation phase 5/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
@@ -196,3 +196,52 @@ impl HwDecoder {
     ) -> Option<*mut c_void> {
         let ctx = (api.avcodec_alloc_context3)(codec);
         if ctx.is_null() {
+            return None;
+        }
+
+        let opt_flags = CString::new("flags").unwrap();
+        let opt_flags2 = CString::new("flags2").unwrap();
+        let opt_threads = CString::new("threads").unwrap();
+
+        let _ = (api.av_opt_set_int)(ctx, opt_flags.as_ptr(), AV_CODEC_FLAG_LOW_DELAY as i64, 0);
+        let _ = (api.av_opt_set_int)(ctx, opt_flags2.as_ptr(), AV_CODEC_FLAG2_FAST as i64, 0);
+        let _ = (api.av_opt_set_int)(ctx, opt_threads.as_ptr(), threads, 0);
+
+        if slice_threading {
+            let opt_thread_type = CString::new("thread_type").unwrap();
+            let _ = (api.av_opt_set_int)(ctx, opt_thread_type.as_ptr(), FF_THREAD_SLICE, 0);
+        }
+
+        let open_ret = (api.avcodec_open2)(ctx, codec, ptr::null_mut());
+        if open_ret < 0 {
+            let mut ctx_ptr = ctx;
+            (api.avcodec_free_context)(&mut ctx_ptr);
+            return None;
+        }
+
+        Some(ctx)
+    }
+
+    pub fn backend_name(&self) -> &str {
+        &self.backend_name
+    }
+
+    /// Feeds a single H.264 NAL packet into the decoder in exact sequence (preserving P-frame
+    /// reference integrity). Returns `Ok(true)` if at least one new video frame was decoded.
+    pub fn decode_packet(&mut self, packet: &NalPacket) -> Result<bool, String> {
+        unsafe {
+            (self.api.av_packet_unref)(self.pkt);
+            (*self.pkt).data = packet.payload.as_ptr() as *mut u8;
+            (*self.pkt).size = packet.payload.len() as i32;
+            (*self.pkt).pts = packet.pts_us as i64;
+            (*self.pkt).dts = packet.pts_us as i64;
+
+            let send_ret = (self.api.avcodec_send_packet)(self.codec_ctx, self.pkt);
+            if send_ret < 0 && send_ret != AVERROR_EAGAIN {
+                return Err(format!("avcodec_send_packet error: {}", send_ret));
+            }
+
+            let mut decoded_any = false;
+            loop {
+                (self.api.av_frame_unref)(self.recv_frame);
+                let recv_ret = (self.api.avcodec_receive_frame)(self.codec_ctx, self.recv_frame);
