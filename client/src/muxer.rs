@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 3/8
+// [Mobile Mirror] Progressive implementation phase 4/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -419,3 +419,143 @@ impl NativeIsoMp4Muxer {
                         .clamp(1_350, 1_650)
                 }
             } else {
+                ((raw_delta_us * 90 + 500) / 1_000).max(1)
+            };
+            self.accumulated_us = next_accum_us;
+            self.accumulated_pts_90k += step_90k;
+            self.last_raw_pts_us = Some(packet.pts_us);
+            self.accumulated_pts_90k
+        };
+
+        self.writer.write_all(&avcc_bytes)?;
+        let size = avcc_bytes.len() as u32;
+        self.samples.push(SampleMeta {
+            offset: self.current_offset,
+            size,
+            pts_90k,
+            is_sync: packet.is_keyframe || self.samples.is_empty(),
+        });
+        self.current_offset += size as u64;
+        Ok(())
+    }
+
+    pub fn finalize(mut self) -> io::Result<()> {
+        let mdat_total_size = self.current_offset - self.mdat_header_offset;
+        let moov = self.build_moov_box();
+        self.writer.write_all(&moov)?;
+        self.writer.flush()?;
+
+        // Patch 64-bit mdat size at mdat_header_offset + 8
+        self.writer.seek(SeekFrom::Start(self.mdat_header_offset + 8))?;
+        self.writer.write_all(&mdat_total_size.to_be_bytes())?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn build_moov_box(&self) -> Vec<u8> {
+        let timescale: u32 = 90_000;
+        let default_delta: u32 = 1_500; // 60 FPS in 90kHz ticks
+
+        let mut deltas = Vec::with_capacity(self.samples.len());
+        let mut total_duration_90k: u64 = 0;
+        for i in 0..self.samples.len() {
+            let delta = if i + 1 < self.samples.len() {
+                let d = self.samples[i + 1]
+                    .pts_90k
+                    .saturating_sub(self.samples[i].pts_90k);
+                if d == 0 {
+                    default_delta
+                } else {
+                    d.min(u32::MAX as u64) as u32
+                }
+            } else {
+                default_delta
+            };
+            deltas.push(delta);
+            total_duration_90k += delta as u64;
+        }
+
+        let audio_dur_90k = if !self.audio_samples.is_empty() {
+            let total_audio_frames: u64 = self.audio_samples.iter().map(|s| s.num_samples as u64).sum();
+            (total_audio_frames * 90_000) / 48_000
+        } else {
+            0
+        };
+        let final_movie_dur_90k = total_duration_90k.max(audio_dur_90k);
+
+        let next_track_id = if self.audio_samples.is_empty() { 2 } else { 3 };
+        let mvhd = build_mvhd_box(timescale, final_movie_dur_90k as u32, next_track_id);
+        let tkhd = build_tkhd_box(self.width, self.height, total_duration_90k as u32);
+        let mdhd = build_mdhd_box(timescale, total_duration_90k as u32);
+        let hdlr = build_hdlr_box();
+        let vmhd = build_vmhd_box();
+        let dinf = build_dinf_box();
+        let stbl = self.build_stbl_box(&deltas);
+
+        let minf = wrap_box(b"minf", &[&vmhd, &dinf, &stbl]);
+        let mdia = wrap_box(b"mdia", &[&mdhd, &hdlr, &minf]);
+        let trak_video = wrap_box(b"trak", &[&tkhd, &mdia]);
+
+        if self.audio_samples.is_empty() {
+            wrap_box(b"moov", &[&mvhd, &trak_video])
+        } else {
+            let total_audio_frames: u64 = self.audio_samples.iter().map(|s| s.num_samples as u64).sum();
+            let audio_tkhd = build_audio_tkhd_box(audio_dur_90k as u32);
+            let audio_mdhd = build_mdhd_box(48_000, total_audio_frames as u32);
+            let audio_hdlr = build_audio_hdlr_box();
+            let smhd = build_smhd_box();
+            let audio_dinf = build_dinf_box();
+            let audio_stbl = self.build_audio_stbl_box();
+
+            let audio_minf = wrap_box(b"minf", &[&smhd, &audio_dinf, &audio_stbl]);
+            let audio_mdia = wrap_box(b"mdia", &[&audio_mdhd, &audio_hdlr, &audio_minf]);
+            let trak_audio = wrap_box(b"trak", &[&audio_tkhd, &audio_mdia]);
+
+            wrap_box(b"moov", &[&mvhd, &trak_video, &trak_audio])
+        }
+    }
+
+    fn build_audio_stbl_box(&self) -> Vec<u8> {
+        if self.audio_is_aac {
+            // Standard ISO-BMFF mp4a (AAC-LC 48kHz Stereo) + esds box
+            // Universally playable in Windows 11 Media Player, Movies & TV, VLC, and browsers
+            let asc = if self.aac_config.is_empty() {
+                &[0x11u8, 0x90u8][..]
+            } else {
+                &self.aac_config[..]
+            };
+            let esds_box = build_esds_box(asc);
+
+            let mut mp4a_payload = Vec::new();
+            mp4a_payload.extend_from_slice(&[0u8; 6]); // reserved
+            mp4a_payload.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index = 1
+            mp4a_payload.extend_from_slice(&0u16.to_be_bytes()); // version = 0
+            mp4a_payload.extend_from_slice(&0u16.to_be_bytes()); // revision_level = 0
+            mp4a_payload.extend_from_slice(&0u32.to_be_bytes()); // vendor = 0
+            mp4a_payload.extend_from_slice(&2u16.to_be_bytes()); // channels = 2 (stereo)
+            mp4a_payload.extend_from_slice(&16u16.to_be_bytes()); // samplesize = 16 bit
+            mp4a_payload.extend_from_slice(&0u16.to_be_bytes()); // pre_defined = 0
+            mp4a_payload.extend_from_slice(&0u16.to_be_bytes()); // reserved = 0
+            mp4a_payload.extend_from_slice(&(48000u32 << 16).to_be_bytes()); // samplerate = 48000.0 (16.16 fp)
+            mp4a_payload.extend_from_slice(&esds_box);
+            let mp4a_box = wrap_box(b"mp4a", &[&mp4a_payload]);
+
+            let mut stsd_payload = Vec::new();
+            stsd_payload.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+            stsd_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+            stsd_payload.extend_from_slice(&mp4a_box);
+            let stsd = wrap_box(b"stsd", &[&stsd_payload]);
+
+            // stts: each AAC-LC access unit is 1024 samples at 48kHz
+            let mut stts_payload = Vec::new();
+            stts_payload.extend_from_slice(&0u32.to_be_bytes());
+            stts_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+            stts_payload.extend_from_slice(&(self.audio_samples.len() as u32).to_be_bytes());
+            stts_payload.extend_from_slice(&1024u32.to_be_bytes());
+            let stts = wrap_box(b"stts", &[&stts_payload]);
+
+            // stsc: 1 AAC frame per chunk
+            let mut stsc_payload = Vec::new();
+            stsc_payload.extend_from_slice(&0u32.to_be_bytes());
+            stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+            stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
