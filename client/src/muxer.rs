@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 2/8
+// [Mobile Mirror] Progressive implementation phase 3/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -279,3 +279,143 @@ impl NativeIsoMp4Muxer {
         writer.write_all(b"mdat")?;
         writer.write_all(&0u64.to_be_bytes())?;
         writer.flush()?;
+        let mdat_data_offset = mdat_header_offset + 16;
+
+        Ok(Self {
+            writer,
+            width,
+            height,
+            sps: vec![0x67, 0x42, 0x00, 0x1f],
+            pps: vec![0x68, 0xce, 0x3c, 0x80],
+            latest_sps: vec![0x67, 0x42, 0x00, 0x1f],
+            latest_pps: vec![0x68, 0xce, 0x3c, 0x80],
+            aac_config: vec![0x11, 0x90], // AAC-LC, 48000 Hz, Stereo
+            audio_is_aac: false,
+            mdat_header_offset,
+            current_offset: mdat_data_offset,
+            first_raw_pts_us: None,
+            last_raw_pts_us: None,
+            accumulated_us: 0,
+            accumulated_pts_90k: 0,
+            leading_audio_dropped: 0,
+            samples: Vec::with_capacity(4096),
+            audio_samples: Vec::with_capacity(4096),
+        })
+    }
+
+    pub fn write_packet(&mut self, packet: &NalPacket) -> io::Result<()> {
+        if packet.is_audio {
+            if packet.is_config {
+                if !packet.payload.is_empty() {
+                    self.aac_config = packet.payload.to_vec();
+                }
+                return Ok(());
+            }
+            if packet.payload.is_empty() {
+                return Ok(());
+            }
+            // Align audio start with the first IDR video keyframe at t = 0.000s
+            // (allow audio-only streams to proceed if no video frame arrives after 60 audio packets).
+            if self.samples.is_empty() && self.leading_audio_dropped < 60 {
+                self.leading_audio_dropped += 1;
+                return Ok(());
+            }
+            if packet.is_keyframe {
+                // Hardware-encoded AAC-LC access unit (1024 samples at 48kHz)
+                if !self.audio_is_aac {
+                    self.audio_samples.clear();
+                    self.audio_is_aac = true;
+                }
+                let size = packet.payload.len() as u32;
+                self.writer.write_all(&packet.payload)?;
+                self.audio_samples.push(AudioSampleMeta {
+                    offset: self.current_offset,
+                    size,
+                    num_samples: 1024,
+                });
+                self.current_offset += size as u64;
+            } else if !self.audio_is_aac {
+                // Raw 16-bit stereo PCM fallback
+                let size = packet.payload.len() as u32;
+                let num_samples = size / 4;
+                self.writer.write_all(&packet.payload)?;
+                self.audio_samples.push(AudioSampleMeta {
+                    offset: self.current_offset,
+                    size,
+                    num_samples,
+                });
+                self.current_offset += size as u64;
+            }
+            return Ok(());
+        }
+
+        let (maybe_sps, maybe_pps) = extract_sps_pps(&packet.payload);
+        if let Some(sps) = maybe_sps {
+            if self.samples.is_empty() {
+                self.sps = sps.clone();
+            }
+            self.latest_sps = sps;
+        }
+        if let Some(pps) = maybe_pps {
+            if self.samples.is_empty() {
+                self.pps = pps.clone();
+            }
+            self.latest_pps = pps;
+        }
+        if packet.is_config {
+            return Ok(());
+        }
+
+        // Clean IDR Keyframe Start: ignore any trailing non-IDR P-frames from before recording
+        // started so sample #1 is always a 100% self-contained IDR keyframe at pts_90k = 0.
+        if self.samples.is_empty() && !packet.is_keyframe {
+            return Ok(());
+        }
+
+        let mut avcc_bytes = annexb_to_avcc_sample(&packet.payload);
+        if avcc_bytes.is_empty() {
+            return Ok(());
+        }
+
+        if (packet.is_keyframe || self.samples.is_empty())
+            && (self.latest_sps != self.sps || self.latest_pps != self.pps)
+        {
+            let mut with_cfg = Vec::with_capacity(
+                8 + self.latest_sps.len() + self.latest_pps.len() + avcc_bytes.len(),
+            );
+            with_cfg.extend_from_slice(&(self.latest_sps.len() as u32).to_be_bytes());
+            with_cfg.extend_from_slice(&self.latest_sps);
+            with_cfg.extend_from_slice(&(self.latest_pps.len() as u32).to_be_bytes());
+            with_cfg.extend_from_slice(&self.latest_pps);
+            with_cfg.extend_from_slice(&avcc_bytes);
+            avcc_bytes = with_cfg;
+        }
+
+        // High-precision 90kHz timestamp accumulation with 60 FPS USB de-jitter pacing
+        let pts_90k = if self.samples.is_empty() {
+            self.first_raw_pts_us = Some(packet.pts_us);
+            let _ = self.first_raw_pts_us;
+            self.last_raw_pts_us = Some(packet.pts_us);
+            self.accumulated_us = 0;
+            self.accumulated_pts_90k = 0;
+            0
+        } else {
+            let prev_us = self.last_raw_pts_us.unwrap_or(packet.pts_us);
+            let raw_delta_us = if packet.pts_us > prev_us && (packet.pts_us - prev_us) < 2_000_000 {
+                packet.pts_us - prev_us
+            } else {
+                16_667 // Smooth 60 FPS step across encoder restarts
+            };
+            let next_accum_us = self.accumulated_us + raw_delta_us;
+            let true_elapsed_90k = (next_accum_us * 90 + 500) / 1_000;
+            let step_90k = if (11_500..=22_000).contains(&raw_delta_us) {
+                let candidate_90k = self.accumulated_pts_90k + 1_500;
+                let drift = candidate_90k as i64 - true_elapsed_90k as i64;
+                if drift.abs() <= 4_500 {
+                    1_500
+                } else {
+                    true_elapsed_90k
+                        .saturating_sub(self.accumulated_pts_90k)
+                        .clamp(1_350, 1_650)
+                }
+            } else {
