@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 6/8
+// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -839,3 +839,143 @@ fn build_mvhd_box(timescale: u32, duration: u32, next_track_id: u32) -> Vec<u8> 
         0,
         0,
         0,
+        0x0001_0000,
+        0,
+        0,
+        0,
+        0x4000_0000,
+    ] {
+        p.extend_from_slice(&v.to_be_bytes());
+    }
+    p.extend_from_slice(&[0u8; 24]); // pre_defined
+    p.extend_from_slice(&next_track_id.to_be_bytes());
+    wrap_box(b"mvhd", &[&p])
+}
+
+fn build_audio_tkhd_box(duration: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(84);
+    p.extend_from_slice(&0x0000_0003u32.to_be_bytes()); // flags: track_enabled | track_in_movie
+    p.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+    p.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+    p.extend_from_slice(&2u32.to_be_bytes()); // track_ID = 2
+    p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    p.extend_from_slice(&duration.to_be_bytes());
+    p.extend_from_slice(&[0u8; 8]); // reserved
+    p.extend_from_slice(&0u16.to_be_bytes()); // layer
+    p.extend_from_slice(&0u16.to_be_bytes()); // alternate_group
+    p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume = 1.0 (audio)
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    for &v in &[
+        0x0001_0000u32,
+        0,
+        0,
+        0,
+        0x0001_0000,
+        0,
+        0,
+        0,
+        0x4000_0000,
+    ] {
+        p.extend_from_slice(&v.to_be_bytes());
+    }
+    p.extend_from_slice(&0u32.to_be_bytes()); // width = 0
+    p.extend_from_slice(&0u32.to_be_bytes()); // height = 0
+    wrap_box(b"tkhd", &[&p])
+}
+
+fn build_tkhd_box(width: u32, height: u32, duration: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(84);
+    p.extend_from_slice(&0x0000_0003u32.to_be_bytes()); // flags: track_enabled | track_in_movie
+    p.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+    p.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+    p.extend_from_slice(&1u32.to_be_bytes()); // track_ID = 1
+    p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    p.extend_from_slice(&duration.to_be_bytes());
+    p.extend_from_slice(&[0u8; 8]); // reserved
+    p.extend_from_slice(&0u16.to_be_bytes()); // layer
+    p.extend_from_slice(&0u16.to_be_bytes()); // alternate_group
+    p.extend_from_slice(&0u16.to_be_bytes()); // volume = 0 (video)
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    for &v in &[
+        0x0001_0000u32,
+        0,
+        0,
+        0,
+        0x0001_0000,
+        0,
+        0,
+        0,
+        0x4000_0000,
+    ] {
+        p.extend_from_slice(&v.to_be_bytes());
+    }
+    p.extend_from_slice(&(width << 16).to_be_bytes());
+    p.extend_from_slice(&(height << 16).to_be_bytes());
+    wrap_box(b"tkhd", &[&p])
+}
+
+fn build_mdhd_box(timescale: u32, duration: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(24);
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&timescale.to_be_bytes());
+    p.extend_from_slice(&duration.to_be_bytes());
+    p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language = "und"
+    p.extend_from_slice(&0u16.to_be_bytes());
+    wrap_box(b"mdhd", &[&p])
+}
+
+fn build_hdlr_box() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // pre_defined
+    p.extend_from_slice(b"vide"); // handler_type
+    p.extend_from_slice(&[0u8; 12]); // reserved
+    p.extend_from_slice(b"VideoHandler\0");
+    wrap_box(b"hdlr", &[&p])
+}
+
+fn build_audio_hdlr_box() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // pre_defined
+    p.extend_from_slice(b"soun"); // handler_type
+    p.extend_from_slice(&[0u8; 12]); // reserved
+    p.extend_from_slice(b"SoundHandler\0");
+    wrap_box(b"hdlr", &[&p])
+}
+
+fn build_vmhd_box() -> Vec<u8> {
+    let mut p = Vec::with_capacity(12);
+    p.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // version 0, flags 1
+    p.extend_from_slice(&[0u8; 8]); // graphicsmode + opcolor
+    wrap_box(b"vmhd", &[&p])
+}
+
+fn build_smhd_box() -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&0u32.to_be_bytes()); // version 0, flags 0
+    p.extend_from_slice(&0u16.to_be_bytes()); // balance = 0
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved = 0
+    wrap_box(b"smhd", &[&p])
+}
+
+fn build_dinf_box() -> Vec<u8> {
+    let url_box = wrap_box(b"url ", &[&0x0000_0001u32.to_be_bytes()]);
+    let mut dref_payload = Vec::new();
+    dref_payload.extend_from_slice(&0u32.to_be_bytes());
+    dref_payload.extend_from_slice(&1u32.to_be_bytes());
+    dref_payload.extend_from_slice(&url_box);
+    let dref = wrap_box(b"dref", &[&dref_payload]);
+    wrap_box(b"dinf", &[&dref])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    #[test]
+    fn test_zero_copy_mp4_muxer_writes_valid_container() {
