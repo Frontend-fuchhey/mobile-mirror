@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 4/8
+// [Mobile Mirror] Progressive implementation phase 5/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -559,3 +559,143 @@ impl NativeIsoMp4Muxer {
             stsc_payload.extend_from_slice(&0u32.to_be_bytes());
             stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
             stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
+            stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // samples_per_chunk = 1
+            stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index = 1
+            let stsc = wrap_box(b"stsc", &[&stsc_payload]);
+
+            // stsz: variable byte size per AAC frame
+            let mut stsz_payload = Vec::new();
+            stsz_payload.extend_from_slice(&0u32.to_be_bytes());
+            stsz_payload.extend_from_slice(&0u32.to_be_bytes()); // sample_size = 0 (variable)
+            stsz_payload.extend_from_slice(&(self.audio_samples.len() as u32).to_be_bytes());
+            for a in &self.audio_samples {
+                stsz_payload.extend_from_slice(&a.size.to_be_bytes());
+            }
+            let stsz = wrap_box(b"stsz", &[&stsz_payload]);
+
+            // co64: 64-bit chunk offsets
+            let mut co64_payload = Vec::new();
+            co64_payload.extend_from_slice(&0u32.to_be_bytes());
+            co64_payload.extend_from_slice(&(self.audio_samples.len() as u32).to_be_bytes());
+            for a in &self.audio_samples {
+                co64_payload.extend_from_slice(&a.offset.to_be_bytes());
+            }
+            let co64 = wrap_box(b"co64", &[&co64_payload]);
+
+            return wrap_box(b"stbl", &[&stsd, &stts, &stsc, &stsz, &co64]);
+        }
+
+        // Fallback: sowt AudioSampleEntry (16-bit little-endian stereo PCM)
+        let total_pcm_frames: u32 = self.audio_samples.iter().map(|s| s.num_samples).sum();
+        let mut sowt_payload = Vec::new();
+        sowt_payload.extend_from_slice(&[0u8; 6]); // reserved
+        sowt_payload.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index = 1
+        sowt_payload.extend_from_slice(&0u16.to_be_bytes()); // version = 0
+        sowt_payload.extend_from_slice(&0u16.to_be_bytes()); // revision_level = 0
+        sowt_payload.extend_from_slice(&0u32.to_be_bytes()); // vendor = 0
+        sowt_payload.extend_from_slice(&2u16.to_be_bytes()); // channels = 2 (stereo)
+        sowt_payload.extend_from_slice(&16u16.to_be_bytes()); // samplesize = 16 bit
+        sowt_payload.extend_from_slice(&0u16.to_be_bytes()); // compression_id = 0
+        sowt_payload.extend_from_slice(&0u16.to_be_bytes()); // packet_size = 0
+        sowt_payload.extend_from_slice(&(48000u32 << 16).to_be_bytes()); // samplerate = 48000.0 (16.16 fp)
+        let sowt_box = wrap_box(b"sowt", &[&sowt_payload]);
+
+        let mut stsd_payload = Vec::new();
+        stsd_payload.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+        stsd_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+        stsd_payload.extend_from_slice(&sowt_box);
+        let stsd = wrap_box(b"stsd", &[&stsd_payload]);
+
+        // stts: each PCM sample frame has duration = 1 tick at 48kHz
+        let mut stts_payload = Vec::new();
+        stts_payload.extend_from_slice(&0u32.to_be_bytes());
+        stts_payload.extend_from_slice(&1u32.to_be_bytes());
+        stts_payload.extend_from_slice(&total_pcm_frames.to_be_bytes());
+        stts_payload.extend_from_slice(&1u32.to_be_bytes());
+        let stts = wrap_box(b"stts", &[&stts_payload]);
+
+        // stsc: each chunk i has a.num_samples PCM frames
+        let mut stsc_payload = Vec::new();
+        stsc_payload.extend_from_slice(&0u32.to_be_bytes());
+        stsc_payload.extend_from_slice(&(self.audio_samples.len() as u32).to_be_bytes());
+        for (idx, a) in self.audio_samples.iter().enumerate() {
+            stsc_payload.extend_from_slice(&((idx + 1) as u32).to_be_bytes());
+            stsc_payload.extend_from_slice(&a.num_samples.to_be_bytes());
+            stsc_payload.extend_from_slice(&1u32.to_be_bytes());
+        }
+        let stsc = wrap_box(b"stsc", &[&stsc_payload]);
+
+        // stsz: constant 4 bytes per 16-bit stereo PCM sample frame
+        let mut stsz_payload = Vec::new();
+        stsz_payload.extend_from_slice(&0u32.to_be_bytes());
+        stsz_payload.extend_from_slice(&4u32.to_be_bytes()); // sample_size = 4 bytes
+        stsz_payload.extend_from_slice(&total_pcm_frames.to_be_bytes());
+        let stsz = wrap_box(b"stsz", &[&stsz_payload]);
+
+        // co64: 64-bit chunk offsets
+        let mut co64_payload = Vec::new();
+        co64_payload.extend_from_slice(&0u32.to_be_bytes());
+        co64_payload.extend_from_slice(&(self.audio_samples.len() as u32).to_be_bytes());
+        for a in &self.audio_samples {
+            co64_payload.extend_from_slice(&a.offset.to_be_bytes());
+        }
+        let co64 = wrap_box(b"co64", &[&co64_payload]);
+
+        wrap_box(b"stbl", &[&stsd, &stts, &stsc, &stsz, &co64])
+    }
+
+    fn build_stbl_box(&self, deltas: &[u32]) -> Vec<u8> {
+        // 1. avcC (AVC Decoder Configuration Record)
+        let profile_idc = *self.sps.get(1).unwrap_or(&0x42);
+        let profile_compat = *self.sps.get(2).unwrap_or(&0x00);
+        let level_idc = *self.sps.get(3).unwrap_or(&0x1f);
+
+        let mut avcc_payload = Vec::new();
+        avcc_payload.push(1); // configurationVersion = 1
+        avcc_payload.push(profile_idc);
+        avcc_payload.push(profile_compat);
+        avcc_payload.push(level_idc);
+        avcc_payload.push(0xFF); // 4-byte NAL length size minus 1
+        avcc_payload.push(0xE1); // 1 SPS
+        avcc_payload.extend_from_slice(&(self.sps.len() as u16).to_be_bytes());
+        avcc_payload.extend_from_slice(&self.sps);
+        avcc_payload.push(1); // 1 PPS
+        avcc_payload.extend_from_slice(&(self.pps.len() as u16).to_be_bytes());
+        avcc_payload.extend_from_slice(&self.pps);
+        if matches!(profile_idc, 100 | 110 | 122 | 244) {
+            // ISO/IEC 14496-15 High Profile extension fields (4:2:0 8-bit)
+            avcc_payload.extend_from_slice(&[0xFD, 0xF8, 0xF8, 0x00]);
+        }
+        let avcc_box = wrap_box(b"avcC", &[&avcc_payload]);
+
+        // BT.709 color information box (colr -> nclx)
+        let mut colr_payload = Vec::with_capacity(11);
+        colr_payload.extend_from_slice(b"nclx");
+        colr_payload.extend_from_slice(&1u16.to_be_bytes()); // colour_primaries = 1 (BT.709)
+        colr_payload.extend_from_slice(&1u16.to_be_bytes()); // transfer_characteristics = 1 (BT.709)
+        colr_payload.extend_from_slice(&1u16.to_be_bytes()); // matrix_coefficients = 1 (BT.709)
+        colr_payload.push(0x00); // full_range_flag = 0
+        let colr_box = wrap_box(b"colr", &[&colr_payload]);
+
+        // Square pixel aspect ratio box (pasp 1:1)
+        let mut pasp_payload = Vec::with_capacity(8);
+        pasp_payload.extend_from_slice(&1u32.to_be_bytes()); // hSpacing = 1
+        pasp_payload.extend_from_slice(&1u32.to_be_bytes()); // vSpacing = 1
+        let pasp_box = wrap_box(b"pasp", &[&pasp_payload]);
+
+        // 2. avc1 VisualSampleEntry
+        let mut avc1_payload = Vec::new();
+        avc1_payload.extend_from_slice(&[0u8; 6]); // reserved
+        avc1_payload.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index = 1
+        avc1_payload.extend_from_slice(&[0u8; 16]); // pre_defined + reserved
+        avc1_payload.extend_from_slice(&(self.width as u16).to_be_bytes());
+        avc1_payload.extend_from_slice(&(self.height as u16).to_be_bytes());
+        avc1_payload.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // horizresolution 72 dpi
+        avc1_payload.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // vertresolution 72 dpi
+        avc1_payload.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        avc1_payload.extend_from_slice(&1u16.to_be_bytes()); // frame_count = 1
+        avc1_payload.extend_from_slice(&[0u8; 32]); // compressorname
+        avc1_payload.extend_from_slice(&0x0018u16.to_be_bytes()); // depth = 24
+        avc1_payload.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
+        avc1_payload.extend_from_slice(&avcc_box);
+        avc1_payload.extend_from_slice(&colr_box);
