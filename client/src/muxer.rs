@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -979,3 +978,144 @@ mod tests {
 
     #[test]
     fn test_zero_copy_mp4_muxer_writes_valid_container() {
+        let tmp_path = std::env::temp_dir().join("mobile_mirror_test_output.mp4");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut muxer = NativeIsoMp4Muxer::new(&tmp_path, 1920, 1080).unwrap();
+
+        // 1. Config packet (SPS + PPS)
+        let config_pkt = NalPacket {
+            pts_us: 0,
+            is_config: true,
+            is_keyframe: false,
+            is_audio: false,
+            payload: Arc::from(
+                &b"\x00\x00\x00\x01\x67\x42\x00\x1f\xe9\x00\x00\x00\x01\x68\xce\x3c\x80"[..],
+            ),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&config_pkt).unwrap();
+
+        // 2. IDR keyframe packet
+        let idr_pkt = NalPacket {
+            pts_us: 1000,
+            is_config: false,
+            is_keyframe: true,
+            is_audio: false,
+            payload: Arc::from(&b"\x00\x00\x00\x01\x65\x88\x84\x21\xa0"[..]),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&idr_pkt).unwrap();
+
+        // 3. Non-IDR P-frame packet
+        let p_pkt = NalPacket {
+            pts_us: 17667,
+            is_config: false,
+            is_keyframe: false,
+            is_audio: false,
+            payload: Arc::from(&b"\x00\x00\x00\x01\x41\x9a\x24\x6c"[..]),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&p_pkt).unwrap();
+
+        muxer.finalize().unwrap();
+
+        let bytes = std::fs::read(&tmp_path).unwrap();
+        assert!(bytes.len() > 200);
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert_eq!(&bytes[32..36], b"mdat");
+        assert!(bytes.windows(4).any(|w| w == b"moov"));
+        assert!(bytes.windows(4).any(|w| w == b"avcC"));
+        assert!(bytes.windows(4).any(|w| w == b"colr"));
+        assert!(bytes.windows(4).any(|w| w == b"pasp"));
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_clean_idr_start_rle_stts_and_60fps_dejitter() {
+        let tmp_path = std::env::temp_dir().join("mobile_mirror_test_idr_rle.mp4");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut muxer = NativeIsoMp4Muxer::new(&tmp_path, 1080, 2400).unwrap();
+
+        // 1. Config packet (High Profile 0x64 SPS + PPS)
+        let config_pkt = NalPacket {
+            pts_us: 0,
+            is_config: true,
+            is_keyframe: false,
+            is_audio: false,
+            payload: Arc::from(
+                &b"\x00\x00\x00\x01\x67\x64\x00\x2a\xac\x00\x00\x00\x01\x68\xee\x3c\x80"[..],
+            ),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&config_pkt).unwrap();
+
+        // 2. Leading non-IDR P-frame and audio frame before IDR must be dropped cleanly
+        let leading_p = NalPacket {
+            pts_us: 500_000,
+            is_config: false,
+            is_keyframe: false,
+            is_audio: false,
+            payload: Arc::from(&b"\x00\x00\x00\x01\x41\x9a\x24\x6c"[..]),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&leading_p).unwrap();
+        assert!(muxer.samples.is_empty());
+
+        let leading_audio = NalPacket {
+            pts_us: 505_000,
+            is_config: false,
+            is_keyframe: true,
+            is_audio: true,
+            payload: Arc::from(&b"\xde\x04\x00\x26\x20"[..]),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&leading_audio).unwrap();
+        assert!(muxer.audio_samples.is_empty());
+
+        // 3. First IDR keyframe starts at pts_90k = 0
+        let idr_pkt = NalPacket {
+            pts_us: 516_667,
+            is_config: false,
+            is_keyframe: true,
+            is_audio: false,
+            payload: Arc::from(&b"\x00\x00\x00\x01\x65\x88\x84\x21\xa0"[..]),
+            received_at: Instant::now(),
+        };
+        muxer.write_packet(&idr_pkt).unwrap();
+        assert_eq!(muxer.samples.len(), 1);
+        assert_eq!(muxer.samples[0].pts_90k, 0);
+        assert!(muxer.samples[0].is_sync);
+
+        // 4. Subsequent 60 FPS P-frames with slight USB arrival jitter (15.2ms, 18.1ms, 16.7ms)
+        // must be de-jittered to exact 1_500 ticks (60.00 FPS)
+        for &pts in &[531_867u64, 549_967, 566_667] {
+            let p_pkt = NalPacket {
+                pts_us: pts,
+                is_config: false,
+                is_keyframe: false,
+                is_audio: false,
+                payload: Arc::from(&b"\x00\x00\x00\x01\x41\x9a\x24\x6c"[..]),
+                received_at: Instant::now(),
+            };
+            muxer.write_packet(&p_pkt).unwrap();
+        }
+        assert_eq!(muxer.samples.len(), 4);
+        assert_eq!(muxer.samples[1].pts_90k, 1_500);
+        assert_eq!(muxer.samples[2].pts_90k, 3_000);
+        assert_eq!(muxer.samples[3].pts_90k, 4_500);
+
+        muxer.finalize().unwrap();
+        let bytes = std::fs::read(&tmp_path).unwrap();
+        // Verify RLE stts box: 24 bytes total (size=24, "stts", ver/flags=0, entry_count=1, sample_count=4, sample_delta=1500)
+        let expected_stts: [u8; 24] = [
+            0, 0, 0, 24, b's', b't', b't', b's', 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0x05,
+            0xDC,
+        ];
+        assert!(bytes.windows(24).any(|w| w == expected_stts));
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
