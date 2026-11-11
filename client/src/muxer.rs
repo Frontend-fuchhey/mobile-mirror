@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 5/8
+// [Mobile Mirror] Progressive implementation phase 6/8
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVFormatContext, AVPacket, AVRational, AVFMT_NOFILE, AVIO_FLAG_WRITE,
     AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, AV_PKT_FLAG_KEY,
@@ -699,3 +699,143 @@ impl NativeIsoMp4Muxer {
         avc1_payload.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
         avc1_payload.extend_from_slice(&avcc_box);
         avc1_payload.extend_from_slice(&colr_box);
+        avc1_payload.extend_from_slice(&pasp_box);
+        let avc1_box = wrap_box(b"avc1", &[&avc1_payload]);
+
+        let mut stsd_payload = Vec::new();
+        stsd_payload.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+        stsd_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+        stsd_payload.extend_from_slice(&avc1_box);
+        let stsd = wrap_box(b"stsd", &[&stsd_payload]);
+
+        // 3. stts (Decoding Time to Sample — run-length encoded)
+        let mut rle_entries: Vec<(u32, u32)> = Vec::new();
+        for &d in deltas {
+            if let Some(last) = rle_entries.last_mut() {
+                if last.1 == d {
+                    last.0 += 1;
+                    continue;
+                }
+            }
+            rle_entries.push((1, d));
+        }
+        let mut stts_payload = Vec::with_capacity(8 + rle_entries.len() * 8);
+        stts_payload.extend_from_slice(&0u32.to_be_bytes());
+        stts_payload.extend_from_slice(&(rle_entries.len() as u32).to_be_bytes());
+        for (count, delta) in rle_entries {
+            stts_payload.extend_from_slice(&count.to_be_bytes());
+            stts_payload.extend_from_slice(&delta.to_be_bytes());
+        }
+        let stts = wrap_box(b"stts", &[&stts_payload]);
+
+        // 4. stss (Sync Sample Box - keyframes)
+        let sync_indices: Vec<u32> = self
+            .samples
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| if s.is_sync { Some((idx + 1) as u32) } else { None })
+            .collect();
+        let mut stss_payload = Vec::new();
+        stss_payload.extend_from_slice(&0u32.to_be_bytes());
+        stss_payload.extend_from_slice(&(sync_indices.len() as u32).to_be_bytes());
+        for idx in sync_indices {
+            stss_payload.extend_from_slice(&idx.to_be_bytes());
+        }
+        let stss = wrap_box(b"stss", &[&stss_payload]);
+
+        // 5. stsc (Sample to Chunk - 1 sample per chunk)
+        let mut stsc_payload = Vec::new();
+        stsc_payload.extend_from_slice(&0u32.to_be_bytes());
+        stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+        stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
+        stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // samples_per_chunk = 1
+        stsc_payload.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index = 1
+        let stsc = wrap_box(b"stsc", &[&stsc_payload]);
+
+        // 6. stsz (Sample Size Box)
+        let mut stsz_payload = Vec::new();
+        stsz_payload.extend_from_slice(&0u32.to_be_bytes());
+        stsz_payload.extend_from_slice(&0u32.to_be_bytes()); // sample_size = 0 (variable)
+        stsz_payload.extend_from_slice(&(self.samples.len() as u32).to_be_bytes());
+        for s in &self.samples {
+            stsz_payload.extend_from_slice(&s.size.to_be_bytes());
+        }
+        let stsz = wrap_box(b"stsz", &[&stsz_payload]);
+
+        // 7. co64 (64-bit Chunk Offset Box)
+        let mut co64_payload = Vec::new();
+        co64_payload.extend_from_slice(&0u32.to_be_bytes());
+        co64_payload.extend_from_slice(&(self.samples.len() as u32).to_be_bytes());
+        for s in &self.samples {
+            co64_payload.extend_from_slice(&s.offset.to_be_bytes());
+        }
+        let co64 = wrap_box(b"co64", &[&co64_payload]);
+
+        wrap_box(b"stbl", &[&stsd, &stts, &stss, &stsc, &stsz, &co64])
+    }
+}
+
+fn build_esds_box(asc: &[u8]) -> Vec<u8> {
+    let dsi_len = asc.len();
+    let dec_cfg_len = 13 + 2 + dsi_len;
+    let es_desc_len = 3 + 2 + dec_cfg_len + 3;
+
+    let mut p = Vec::with_capacity(4 + 2 + es_desc_len);
+    p.extend_from_slice(&0u32.to_be_bytes()); // FullBox version=0, flags=0
+
+    // ES_Descriptor (tag 0x03)
+    p.push(0x03);
+    p.push(es_desc_len as u8);
+    p.extend_from_slice(&2u16.to_be_bytes()); // ES_ID = 2
+    p.push(0x00); // streamDependenceFlag=0, URL_Flag=0, OCRstreamFlag=0, streamPriority=0
+
+    // DecoderConfigDescriptor (tag 0x04)
+    p.push(0x04);
+    p.push(dec_cfg_len as u8);
+    p.push(0x40); // objectTypeIndication = 0x40 (Audio ISO/IEC 14496-3 / AAC)
+    p.push(0x15); // streamType = 5 (AudioStream) << 2 | 1
+    p.extend_from_slice(&[0x00, 0x20, 0x00]); // bufferSizeDB = 8192
+    p.extend_from_slice(&192_000u32.to_be_bytes()); // maxBitrate
+    p.extend_from_slice(&192_000u32.to_be_bytes()); // avgBitrate
+
+    // DecoderSpecificInfo (tag 0x05)
+    p.push(0x05);
+    p.push(dsi_len as u8);
+    p.extend_from_slice(asc);
+
+    // SLConfigDescriptor (tag 0x06)
+    p.push(0x06);
+    p.push(0x01);
+    p.push(0x02); // predefined = 2 (MP4)
+
+    wrap_box(b"esds", &[&p])
+}
+
+fn wrap_box(fourcc: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
+    let payload_len: usize = parts.iter().map(|p| p.len()).sum();
+    let total_len = (8 + payload_len) as u32;
+    let mut out = Vec::with_capacity(total_len as usize);
+    out.extend_from_slice(&total_len.to_be_bytes());
+    out.extend_from_slice(fourcc);
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+fn build_mvhd_box(timescale: u32, duration: u32, next_track_id: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(100);
+    p.extend_from_slice(&0u32.to_be_bytes()); // version + flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+    p.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+    p.extend_from_slice(&timescale.to_be_bytes());
+    p.extend_from_slice(&duration.to_be_bytes());
+    p.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // rate = 1.0
+    p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume = 1.0
+    p.extend_from_slice(&[0u8; 10]); // reserved
+    // Identity matrix (36 bytes)
+    for &v in &[
+        0x0001_0000u32,
+        0,
+        0,
+        0,
