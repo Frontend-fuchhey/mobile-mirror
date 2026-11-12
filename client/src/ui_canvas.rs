@@ -1083,3 +1083,220 @@ impl UiCanvas {
         let cy = psy + psh * 0.5;
         let half_w = psw * 0.5;
         let half_h = psh * 0.5;
+        let inner_w = (half_w - psr).max(0.0);
+        let inner_h = (half_h - psr).max(0.0);
+
+        let min_x = (psx.floor() as i32 - 1).max(0);
+        let max_x = ((psx + psw).ceil() as i32 + 1).min(self.width as i32 - 1);
+        let min_y = (psy.floor() as i32 - 1).max(0);
+        let max_y = ((psy + psh).ceil() as i32 + 1).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            let v = ((fy - psy) / psh).clamp(0.0, 1.0);
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let qx = (fx - cx).abs() - inner_w;
+                let qy = (fy - cy).abs() - inner_h;
+                let dist = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - psr;
+                if dist < 0.75 {
+                    let cov = (0.5 - dist).clamp(0.0, 1.0);
+                    let u = ((fx - psx) / psw).clamp(0.0, 1.0);
+                    let col = sample_blue_wave_wallpaper(u, v);
+                    self.blend_pixel(px, py, col, cov);
+                }
+            }
+        }
+
+        // 3. Top notch / dynamic speaker cutout
+        let notch_w = (w * 0.42).round();
+        let notch_h = (bezel_w * 1.45).max(4.5);
+        self.draw_rounded_card(
+            x + (w - notch_w) * 0.5,
+            y + bezel_w * 0.35,
+            notch_w,
+            notch_h,
+            notch_h * 0.48,
+            Rgb(14, 18, 30),
+            Rgb(14, 18, 30),
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    }
+
+    /// Renders the complete Hero Illustration (Laptop + Mirrored Phone + Signal Waves + Standalone Phone)
+    /// centered horizontally around `center_x` with top anchor `top_y`.
+    pub fn draw_hero_laptop_phone_illustration(
+        &mut self,
+        center_x: f32,
+        top_y: f32,
+        is_connecting: bool,
+    ) {
+        // 1. Soft overlapping ambient sky-blue cloud circles behind the devices
+        let left_cloud_cx = center_x - 62.0;
+        let left_cloud_cy = top_y + 132.0;
+        self.draw_circle(left_cloud_cx, left_cloud_cy, 126.0, Rgb(239, 244, 254), 0.92);
+
+        let right_cloud_cx = center_x + 148.0;
+        let right_cloud_cy = top_y + 138.0;
+        self.draw_circle(right_cloud_cx, right_cloud_cy, 96.0, Rgb(239, 244, 254), 0.88);
+
+        // Soft ambient floor glow beneath both devices
+        self.draw_soft_ellipse(
+            center_x + 20.0,
+            top_y + 228.0,
+            245.0,
+            26.0,
+            22.0,
+            Rgb(220, 232, 253),
+            0.65,
+        );
+
+        // 2. Left 3D Laptop (lid + screen + mirrored phone + metallic base)
+        let lid_w = 224.0;
+        let lid_h = 158.0;
+        let lid_x = (center_x - 180.0).round();
+        let lid_y = (top_y + 52.0).round();
+
+        // Contact shadow under laptop base
+        self.draw_soft_ellipse(
+            lid_x + lid_w * 0.5,
+            lid_y + lid_h + 12.0,
+            148.0,
+            11.0,
+            8.0,
+            Rgb(30, 48, 86),
+            0.22,
+        );
+
+        // Laptop lid outer bezel (#0E1320 with subtle silver edge)
+        self.draw_rounded_card(
+            lid_x,
+            lid_y,
+            lid_w,
+            lid_h,
+            10.0,
+            Rgb(14, 19, 32),
+            Rgb(118, 124, 138),
+            1.2,
+            SHADOW_SLATE,
+            0.12,
+            14.0,
+            4.0,
+            1.0,
+        );
+        // Tiny webcam indicator dot on top bezel
+        self.draw_circle(lid_x + lid_w * 0.5, lid_y + 4.2, 1.2, Rgb(62, 72, 92), 1.0);
+
+        // Laptop inner display wallpaper (soft periwinkle-blue gradient with subtle diagonal wave)
+        let scr_x = lid_x + 7.5;
+        let scr_y = lid_y + 7.5;
+        let scr_w = lid_w - 15.0;
+        let scr_h = lid_h - 14.0;
+        self.draw_gradient_rounded_card(
+            scr_x,
+            scr_y,
+            scr_w,
+            scr_h,
+            3.5,
+            Rgb(192, 214, 250),
+            Rgb(226, 237, 254),
+            Rgb(180, 202, 240),
+            0.6,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        // Subtle light-blue wave curve across laptop display
+        self.draw_soft_ellipse(
+            scr_x + scr_w * 0.25,
+            scr_y + scr_h * 0.82,
+            92.0,
+            44.0,
+            16.0,
+            Rgb(172, 199, 246),
+            0.45,
+        );
+
+        // Mirrored Smartphone centered inside Laptop display!
+        let m_phone_w = 62.0;
+        let m_phone_h = 122.0;
+        let m_phone_x = (lid_x + (lid_w - m_phone_w) * 0.5).round();
+        let m_phone_y = (scr_y + (scr_h - m_phone_h) * 0.5 + 1.0).round();
+        self.draw_phone_with_wave_wallpaper(
+            m_phone_x,
+            m_phone_y,
+            m_phone_w,
+            m_phone_h,
+            8.5,
+            3.0,
+            0.22,
+        );
+
+        // Laptop metallic aluminum base / deck
+        let base_w = 274.0;
+        let base_h = 11.5;
+        let base_x = (lid_x + (lid_w - base_w) * 0.5).round();
+        let base_y = lid_y + lid_h - 2.0;
+        self.draw_gradient_rounded_card(
+            base_x,
+            base_y,
+            base_w,
+            base_h,
+            4.5,
+            Rgb(226, 229, 238),
+            Rgb(118, 124, 138),
+            Rgb(152, 158, 172),
+            0.8,
+            SHADOW_SLATE,
+            0.14,
+            6.0,
+            2.0,
+            1.0,
+        );
+        // Top highlight strip of aluminum deck
+        self.draw_rounded_card(
+            base_x + 2.0,
+            base_y + 0.5,
+            base_w - 4.0,
+            3.5,
+            1.5,
+            Rgb(242, 244, 249),
+            Rgb(242, 244, 249),
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            0.85,
+        );
+        // Center thumb-indent notch on laptop deck
+        let lip_w = 44.0;
+        self.draw_rounded_card(
+            base_x + (base_w - lip_w) * 0.5,
+            base_y + 0.5,
+            lip_w,
+            3.5,
+            1.7,
+            Rgb(142, 148, 162),
+            Rgb(142, 148, 162),
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        // 3. Center Wireless Signal Waves (`•))`) between Laptop and Smartphone
+        let sig_cx = center_x + 84.0;
+        let sig_cy = top_y + 142.0;
+        let wave_pulse = if is_connecting {
+            0.65 + 0.35 * self.anim.glide_phase.sin()
+        } else {
