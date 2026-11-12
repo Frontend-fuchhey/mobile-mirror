@@ -1300,3 +1300,220 @@ impl UiCanvas {
         let wave_pulse = if is_connecting {
             0.65 + 0.35 * self.anim.glide_phase.sin()
         } else {
+            1.0
+        };
+        let wave_col = Rgb(47, 118, 246);
+        self.draw_circle(sig_cx, sig_cy, 5.2, wave_col, 1.0);
+        self.draw_arc_stroke(
+            sig_cx - 2.0,
+            sig_cy,
+            17.0,
+            -0.72,
+            0.72,
+            4.8,
+            wave_col,
+            wave_pulse,
+        );
+        self.draw_arc_stroke(
+            sig_cx - 2.0,
+            sig_cy,
+            29.5,
+            -0.76,
+            0.76,
+            4.8,
+            wave_col,
+            wave_pulse * 0.92,
+        );
+
+        // 4. Right Standalone 3D Smartphone
+        let r_phone_w = 72.0;
+        let r_phone_h = 152.0;
+        let r_phone_x = (center_x + 140.0).round();
+        let r_phone_y = (top_y + 64.0).round();
+
+        // Floor shadow under standalone phone
+        self.draw_soft_ellipse(
+            r_phone_x + r_phone_w * 0.5,
+            r_phone_y + r_phone_h + 4.0,
+            52.0,
+            9.5,
+            7.0,
+            Rgb(30, 48, 86),
+            0.24,
+        );
+
+        self.draw_phone_with_wave_wallpaper(
+            r_phone_x,
+            r_phone_y,
+            r_phone_w,
+            r_phone_h,
+            11.0,
+            3.5,
+            0.18,
+        );
+    }
+
+    /// Legacy startup icon helper kept for unit tests.
+    pub fn draw_smartphone_usb_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        self.draw_phone_outline_icon(cx, cy, color, opacity);
+    }
+
+    // ========================================================================
+    // TrueType Typography Engine
+    // ========================================================================
+
+    fn select_font(&self, weight: FontWeight) -> Option<&FontArc> {
+        match weight {
+            FontWeight::Regular => self.font_regular.as_ref(),
+            FontWeight::Semibold => self.font_semibold.as_ref().or(self.font_regular.as_ref()),
+            FontWeight::Bold => self
+                .font_bold
+                .as_ref()
+                .or(self.font_semibold.as_ref())
+                .or(self.font_regular.as_ref()),
+        }
+    }
+
+    /// Converts a logical CSS/UI font size (`px_size`, where 1em = `px_size`) into `ab_glyph`'s
+    /// total line-height `PxScale` (`ascent - descent`), preventing Segoe UI's 1.33x internal
+    /// leading from shrinking rendered glyphs by 25%.
+    #[inline]
+    fn font_px_scale(font: &FontArc, px_size: f32, dpi_scale: f32) -> PxScale {
+        PxScale::from(px_size * dpi_scale)
+    }
+
+    /// Returns exact optical cap-height (height of uppercase `'H'`) in logical units for vertical pill centering.
+    pub fn cap_height(&self, px_size: f32, weight: FontWeight) -> f32 {
+        let Some(font) = self.select_font(weight) else {
+            return px_size * 0.70;
+        };
+        let s = self.scale;
+        let scale = Self::font_px_scale(font, px_size, s);
+        let scaled = font.as_scaled(scale);
+        let h_id = scaled.glyph_id('H');
+        let glyph = h_id.with_scale_and_position(scale, point(0.0, 0.0));
+        let phys_cap = scaled
+            .outline_glyph(glyph)
+            .map(|og| {
+                let b = og.px_bounds();
+                (b.max.y - b.min.y).max(1.0)
+            })
+            .unwrap_or_else(|| scaled.ascent() * 0.72);
+        phys_cap / s
+    }
+
+    /// Renders anti-aliased TrueType text positioned at logical `(x, baseline_y)` with native HiDPI glyph rasterization
+    /// and gamma-compensated optical stem darkening so small/medium body text is crisp and readable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_baseline(
+        &mut self,
+        text: &str,
+        x: f32,
+        baseline_y: f32,
+        px_size: f32,
+        weight: FontWeight,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        if opacity <= 0.01 || text.is_empty() {
+            return;
+        }
+        let Some(font) = self.select_font(weight).cloned() else {
+            return;
+        };
+
+        let s = self.scale;
+        let scale = Self::font_px_scale(&font, px_size, s);
+        let scaled_font = font.as_scaled(scale);
+        let mut caret_x = x * s;
+        let phys_baseline_y = baseline_y * s;
+        let mut prev_glyph_id = None;
+
+        for ch in text.chars() {
+            let glyph_id = scaled_font.glyph_id(ch);
+            if let Some(prev) = prev_glyph_id {
+                caret_x += scaled_font.kern(prev, glyph_id);
+            }
+            prev_glyph_id = Some(glyph_id);
+
+            let glyph =
+                glyph_id.with_scale_and_position(scale, point(caret_x, phys_baseline_y));
+            caret_x += scaled_font.h_advance(glyph_id);
+
+            if let Some(outlined) = scaled_font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                let min_x = bounds.min.x.floor() as i32;
+                let min_y = bounds.min.y.floor() as i32;
+                outlined.draw(|gx, gy, cov| {
+                    let px = min_x + gx as i32;
+                    let py = min_y + gy as i32;
+                    // Optical stem darkening / sRGB gamma compensation for crisp legibility
+                    let boosted_cov = cov;
+                    self.blend_pixel(px, py, color, boosted_cov * opacity);
+                });
+            }
+        }
+    }
+
+    /// Renders anti-aliased TrueType text given logical top-of-text `y`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        px_size: f32,
+        weight: FontWeight,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        let cap = self.cap_height(px_size, weight);
+        let baseline_offset = cap + px_size * 0.12;
+        self.draw_text_baseline(
+            text,
+            x,
+            y + baseline_offset,
+            px_size,
+            weight,
+            color,
+            opacity,
+        );
+    }
+
+    /// Measures text advance width in logical coordinates.
+    pub fn measure_text_width(&self, text: &str, px_size: f32, weight: FontWeight) -> f32 {
+        let Some(font) = self.select_font(weight) else {
+            return (text.chars().count() as f32) * px_size * 0.5;
+        };
+
+        let s = self.scale;
+        let scale = Self::font_px_scale(font, px_size, s);
+        let scaled_font = font.as_scaled(scale);
+        let mut width = 0.0f32;
+        let mut prev_id = None;
+        for ch in text.chars() {
+            let id = scaled_font.glyph_id(ch);
+            if let Some(prev) = prev_id {
+                width += scaled_font.kern(prev, id);
+            }
+            prev_id = Some(id);
+            width += scaled_font.h_advance(id);
+        }
+        width / s
+    }
+
+    /// Truncates `text` cleanly with `"…"` if its logical width exceeds `max_width`.
+    pub fn fit_text_to_width(
+        &self,
+        text: &str,
+        max_width: f32,
+        px_size: f32,
+        weight: FontWeight,
+    ) -> String {
+        if self.measure_text_width(text, px_size, weight) <= max_width {
+            return text.to_string();
+        }
+        let ellipsis = "…";
+        let ell_w = self.measure_text_width(ellipsis, px_size, weight);
+        let mut out = String::new();
+        for ch in text.chars() {
