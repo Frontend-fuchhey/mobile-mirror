@@ -1517,3 +1517,220 @@ impl UiCanvas {
         let ell_w = self.measure_text_width(ellipsis, px_size, weight);
         let mut out = String::new();
         for ch in text.chars() {
+            out.push(ch);
+            if self.measure_text_width(&out, px_size, weight) + ell_w > max_width {
+                out.pop();
+                break;
+            }
+        }
+        format!("{}{}", out.trim_end(), ellipsis)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_centered(
+        &mut self,
+        text: &str,
+        center_x: f32,
+        y: f32,
+        px_size: f32,
+        weight: FontWeight,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        let w = self.measure_text_width(text, px_size, weight);
+        let x = center_x - w * 0.5;
+        self.draw_text(text, x, y, px_size, weight, color, opacity);
+    }
+
+    /// Writes the current physical pixel buffer (`0xAARRGGBB`) as a lossless 24-bit RGB PNG file
+    /// using pure-Rust uncompressed zlib/DEFLATE stored blocks, CRC32, and Adler32.
+    pub fn save_png(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let w = self.width;
+        let h = self.height;
+        let row_len = 1 + w * 3;
+        let mut raw = Vec::with_capacity(h * row_len);
+        for y in 0..h {
+            raw.push(0u8); // Filter type 0 (None)
+            let row_start = y * w;
+            for x in 0..w {
+                let px = self.pixels[row_start + x];
+                raw.push(((px >> 16) & 0xFF) as u8);
+                raw.push(((px >> 8) & 0xFF) as u8);
+                raw.push((px & 0xFF) as u8);
+            }
+        }
+
+        let mut zlib = Vec::with_capacity(raw.len() + (raw.len() / 65535 + 1) * 5 + 6);
+        zlib.extend_from_slice(&[0x78, 0x01]);
+        if raw.is_empty() {
+            zlib.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+        } else {
+            let chunks: Vec<&[u8]> = raw.chunks(65535).collect();
+            let last_idx = chunks.len() - 1;
+            for (i, block) in chunks.into_iter().enumerate() {
+                zlib.push(if i == last_idx { 0x01 } else { 0x00 });
+                let len = block.len() as u16;
+                zlib.extend_from_slice(&len.to_le_bytes());
+                zlib.extend_from_slice(&(!len).to_le_bytes());
+                zlib.extend_from_slice(block);
+            }
+        }
+        zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+        let mut png = Vec::with_capacity(zlib.len() + 64);
+        png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        let mut ihdr = [0u8; 13];
+        ihdr[0..4].copy_from_slice(&(w as u32).to_be_bytes());
+        ihdr[4..8].copy_from_slice(&(h as u32).to_be_bytes());
+        ihdr[8] = 8; // 8 bits per channel
+        ihdr[9] = 2; // Truecolor RGB
+        write_png_chunk(&mut png, b"IHDR", &ihdr);
+        write_png_chunk(&mut png, b"IDAT", &zlib);
+        write_png_chunk(&mut png, b"IEND", &[]);
+
+        fs::write(path, png)
+    }
+}
+
+/// Multi-layered procedural shader matching the blue wave phone wallpaper in the reference screenshot.
+#[inline]
+fn sample_blue_wave_wallpaper(u: f32, v: f32) -> Rgb {
+    // Base upper sky-ice gradient
+    let sky = Rgb(224, 237, 255).lerp(Rgb(162, 198, 255), (v * 1.1 + u * 0.25).clamp(0.0, 1.0));
+
+    // Wave 1: Soft upper-middle cornflower wave flowing from left-top to right-mid
+    let w1_edge = 0.22 + 0.34 * u + 0.06 * (u * 4.2).sin();
+    let d1 = v - w1_edge;
+    let c1 = if d1 > -0.04 {
+        let t = ((d1 + 0.04) / 0.045).clamp(0.0, 1.0);
+        let wave1_col =
+            Rgb(138, 180, 255).lerp(Rgb(68, 128, 248), ((v - w1_edge) * 2.2).clamp(0.0, 1.0));
+        sky.lerp(wave1_col, t)
+    } else {
+        sky
+    };
+
+    // Wave 2: Sweeping cobalt-royal ribbon from mid-left down to bottom-right
+    let w2_edge = 0.44 + 0.38 * u * u - 0.04 * (u * 3.5).cos();
+    let d2 = v - w2_edge;
+    let c2 = if d2 > -0.035 {
+        let t = ((d2 + 0.035) / 0.04).clamp(0.0, 1.0);
+        let depth = ((v - w2_edge) * 2.0 + (1.0 - u) * 0.3).clamp(0.0, 1.0);
+        let wave2_col = Rgb(56, 118, 250).lerp(Rgb(12, 54, 196), depth);
+        c1.lerp(wave2_col, t)
+    } else {
+        c1
+    };
+
+    // Wave 3: Deep indigo/royal bottom-left fold with bright crest highlight
+    let w3_edge = 0.62 + 0.42 * u + 0.05 * (u * 3.0).sin();
+    let d3 = v - w3_edge;
+    if d3 > -0.03 {
+        let t = ((d3 + 0.03) / 0.035).clamp(0.0, 1.0);
+        let ridge = (1.0 - (d3.abs() * 14.0).clamp(0.0, 1.0)) * 0.45;
+        let deep_col = Rgb(8, 30, 124)
+            .lerp(Rgb(28, 86, 235), (u * 0.9 + (1.0 - v) * 0.4).clamp(0.0, 1.0))
+            .lerp(Rgb(115, 168, 255), ridge);
+        c2.lerp(deep_col, t)
+    } else {
+        c2
+    }
+}
+
+/// Exact 2D signed distance to a triangle `(ax, ay) - (bx, by) - (cx, cy)`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn sd_triangle(
+    px: f32,
+    py: f32,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+) -> f32 {
+    let e0x = bx - ax;
+    let e0y = by - ay;
+    let e1x = cx - bx;
+    let e1y = cy - by;
+    let e2x = ax - cx;
+    let e2y = ay - cy;
+
+    let v0x = px - ax;
+    let v0y = py - ay;
+    let v1x = px - bx;
+    let v1y = py - by;
+    let v2x = px - cx;
+    let v2y = py - cy;
+
+    let t0 = ((v0x * e0x + v0y * e0y) / (e0x * e0x + e0y * e0y)).clamp(0.0, 1.0);
+    let t1 = ((v1x * e1x + v1y * e1y) / (e1x * e1x + e1y * e1y)).clamp(0.0, 1.0);
+    let t2 = ((v2x * e2x + v2y * e2y) / (e2x * e2x + e2y * e2y)).clamp(0.0, 1.0);
+
+    let pq0x = v0x - e0x * t0;
+    let pq0y = v0y - e0y * t0;
+    let pq1x = v1x - e1x * t1;
+    let pq1y = v1y - e1y * t1;
+    let pq2x = v2x - e2x * t2;
+    let pq2y = v2y - e2y * t2;
+
+    let s = (e0x * e2y - e0y * e2x).signum();
+    let d0 = pq0x * pq0x + pq0y * pq0y;
+    let d1 = pq1x * pq1x + pq1y * pq1y;
+    let d2 = pq2x * pq2x + pq2y * pq2y;
+    let min_d = d0.min(d1).min(d2).sqrt();
+
+    let c0 = s * (v0x * e0y - v0y * e0x);
+    let c1 = s * (v1x * e1y - v1y * e1x);
+    let c2 = s * (v2x * e2y - v2y * e2x);
+    let min_c = c0.min(c1).min(c2);
+
+    -min_d * min_c.signum()
+}
+
+fn load_system_font(paths: &[&str]) -> Option<FontArc> {
+    for p in paths {
+        if let Ok(bytes) = fs::read(p) {
+            if let Ok(font) = FontArc::try_from_vec(bytes) {
+                return Some(font);
+            }
+        }
+    }
+    None
+}
+
+fn write_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in chunk_type.iter().chain(data.iter()) {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    out.extend_from_slice(&(!crc).to_be_bytes());
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
