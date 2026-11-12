@@ -432,3 +432,220 @@ impl UiCanvas {
         w: f32,
         h: f32,
         radius: f32,
+        stroke_w: f32,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        if opacity <= 0.01 || w <= 0.0 || h <= 0.0 || stroke_w <= 0.05 {
+            return;
+        }
+        let s = self.scale;
+        let x = x * s;
+        let y = y * s;
+        let w = w * s;
+        let h = h * s;
+        let radius = radius * s;
+        let stroke_w = stroke_w * s;
+
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let half_w = w * 0.5;
+        let half_h = h * 0.5;
+        let r = radius.min(half_w).min(half_h).max(0.0);
+        let half_stroke = stroke_w * 0.5;
+
+        let pad = (half_stroke + 3.0).ceil() as i32;
+        let min_x = ((x.floor() as i32) - pad).max(0);
+        let max_x = (((x + w).ceil() as i32) + pad).min(self.width as i32 - 1);
+        let min_y = ((y.floor() as i32) - pad).max(0);
+        let max_y = (((y + h).ceil() as i32) + pad).min(self.height as i32 - 1);
+
+        let inner_w = (half_w - r).max(0.0);
+        let inner_h = (half_h - r).max(0.0);
+
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let qx = (fx - cx).abs() - inner_w;
+                let qy = (fy - cy).abs() - inner_h;
+                let dist = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+                let stroke_dist = dist.abs() - half_stroke;
+                if stroke_dist < 0.75 {
+                    let cov = (0.5 - stroke_dist).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+    }
+
+    pub fn draw_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Rgb, opacity: f32) {
+        if opacity <= 0.01 || radius <= 0.0 {
+            return;
+        }
+        let s = self.scale;
+        let cx = cx * s;
+        let cy = cy * s;
+        let radius = radius * s;
+
+        let min_x = ((cx - radius - 2.0).floor() as i32).max(0);
+        let max_x = ((cx + radius + 2.0).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((cy - radius - 2.0).floor() as i32).max(0);
+        let max_y = ((cy + radius + 2.0).ceil() as i32).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let dy = (py as f32 + 0.5) - cy;
+            for px in min_x..=max_x {
+                let dx = (px as f32 + 0.5) - cx;
+                let dist = (dx * dx + dy * dy).sqrt() - radius;
+                if dist < 0.75 {
+                    let cov = (0.5 - dist).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased circular ring / arc stroke with rounded caps.
+    /// Angles `start_rad` and `end_rad` are in radians (`0.0` = right/+X, `FRAC_PI_2` = down/+Y).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_arc_stroke(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        start_rad: f32,
+        end_rad: f32,
+        stroke_w: f32,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        if opacity <= 0.01 || radius <= 0.0 || stroke_w <= 0.05 {
+            return;
+        }
+        let s = self.scale;
+        let cx = cx * s;
+        let cy = cy * s;
+        let r = radius * s;
+        let half_w = stroke_w * s * 0.5;
+
+        let mid_ang = 0.5 * (start_rad + end_rad);
+        let half_span = 0.5 * (end_rad - start_rad).abs();
+        let dir_x = mid_ang.cos();
+        let dir_y = mid_ang.sin();
+        let cos_span = half_span.cos();
+
+        let p1x = cx + r * start_rad.cos();
+        let p1y = cy + r * start_rad.sin();
+        let p2x = cx + r * end_rad.cos();
+        let p2y = cy + r * end_rad.sin();
+
+        let pad = r + half_w + 3.0;
+        let min_x = ((cx - pad).floor() as i32).max(0);
+        let max_x = ((cx + pad).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((cy - pad).floor() as i32).max(0);
+        let max_y = ((cy + pad).ceil() as i32).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            let dy = fy - cy;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let dx = fx - cx;
+                let len = (dx * dx + dy * dy).sqrt();
+                let in_sector = if len > 0.001 {
+                    (dx * dir_x + dy * dir_y) / len >= cos_span
+                } else {
+                    false
+                };
+                let dist = if in_sector {
+                    (len - r).abs() - half_w
+                } else {
+                    let d1 = (fx - p1x).hypot(fy - p1y);
+                    let d2 = (fx - p2x).hypot(fy - p2y);
+                    d1.min(d2) - half_w
+                };
+                if dist < 0.75 {
+                    let cov = (0.5 - dist).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+    }
+
+    /// Draws a soft diffused elliptical glow / floor shadow centered at `(cx, cy)` that fades smoothly to 0 at `(rx, ry)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_soft_ellipse(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        _feather: f32,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        if opacity <= 0.002 || rx <= 0.0 || ry <= 0.0 {
+            return;
+        }
+        let s = self.scale;
+        let cx = cx * s;
+        let cy = cy * s;
+        let total_rx = rx * s;
+        let total_ry = ry * s;
+
+        let min_x = ((cx - total_rx - 1.0).floor() as i32).max(0);
+        let max_x = ((cx + total_rx + 1.0).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((cy - total_ry - 1.0).floor() as i32).max(0);
+        let max_y = ((cy + total_ry + 1.0).ceil() as i32).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let dy = ((py as f32 + 0.5) - cy) / total_ry;
+            let dy2 = dy * dy;
+            if dy2 >= 1.0 {
+                continue;
+            }
+            for px in min_x..=max_x {
+                let dx = ((px as f32 + 0.5) - cx) / total_rx;
+                let r2 = dx * dx + dy2;
+                if r2 < 1.0 {
+                    let t = 1.0 - r2.sqrt();
+                    let smooth = t * t * (3.0 - 2.0 * t);
+                    self.blend_pixel(px, py, color, smooth * opacity);
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased capsule/line segment in logical coordinates between `(x1, y1)` and `(x2, y2)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_capsule_line(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        stroke_w: f32,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        if opacity <= 0.01 || stroke_w <= 0.05 {
+            return;
+        }
+        let s = self.scale;
+        let x1 = x1 * s;
+        let y1 = y1 * s;
+        let x2 = x2 * s;
+        let y2 = y2 * s;
+        let r = stroke_w * s * 0.5;
+
+        let min_x = ((x1.min(x2) - r - 2.0).floor() as i32).max(0);
+        let max_x = ((x1.max(x2) + r + 2.0).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((y1.min(y2) - r - 2.0).floor() as i32).max(0);
+        let max_y = ((y1.max(y2) + r + 2.0).ceil() as i32).min(self.height as i32 - 1);
+
+        let vx = x2 - x1;
+        let vy = y2 - y1;
+        let len_sq = (vx * vx + vy * vy).max(0.0001);
+
+        for py in min_y..=max_y {
