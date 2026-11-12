@@ -649,3 +649,220 @@ impl UiCanvas {
         let len_sq = (vx * vx + vy * vy).max(0.0001);
 
         for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let t = (((fx - x1) * vx + (fy - y1) * vy) / len_sq).clamp(0.0, 1.0);
+                let proj_x = x1 + t * vx;
+                let proj_y = y1 + t * vy;
+                let dist = (fx - proj_x).hypot(fy - proj_y) - r;
+                if dist < 0.75 {
+                    let cov = (0.5 - dist).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased rounded play triangle `▶` centered at `(cx, cy)`.
+    pub fn draw_play_icon(&mut self, cx: f32, cy: f32, size: f32, color: Rgb, opacity: f32) {
+        if opacity <= 0.01 {
+            return;
+        }
+        let s = self.scale;
+        let cx = cx * s;
+        let cy = cy * s;
+        let r_size = size * s;
+        let round_r = 1.3 * s;
+
+        // Triangle vertices (optically nudged +1px right for play icon balance)
+        let ax = cx - r_size * 0.42;
+        let ay = cy - r_size * 0.56;
+        let bx = cx - r_size * 0.42;
+        let by = cy + r_size * 0.56;
+        let tx = cx + r_size * 0.58;
+        let ty = cy;
+
+        let min_x = ((ax.min(tx) - round_r - 2.0).floor() as i32).max(0);
+        let max_x = ((ax.max(tx) + round_r + 2.0).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((ay.min(by) - round_r - 2.0).floor() as i32).max(0);
+        let max_y = ((ay.max(by) + round_r + 2.0).ceil() as i32).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let d = sd_triangle(fx, fy, ax, ay, bx, by, tx, ty) - round_r;
+                if d < 0.75 {
+                    let cov = (0.5 - d).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Custom Vector Icon Suite Matching Reference Screenshot
+    // ========================================================================
+
+    /// Renders the top-left rounded-square Blue App Icon (`30x30`, `r=8`) with white smartphone + cast symbol.
+    pub fn draw_app_brand_icon(&mut self, x: f32, y: f32, size: f32) {
+        self.draw_gradient_rounded_card(
+            x,
+            y,
+            size,
+            size,
+            size * 0.27,
+            Rgb(78, 156, 252),
+            Rgb(23, 102, 238),
+            Rgb(54, 132, 246),
+            0.8,
+            APPLE_BLUE,
+            0.18,
+            6.0,
+            2.0,
+            1.0,
+        );
+
+        let cx = x + size * 0.5;
+        let cy = y + size * 0.5;
+        // White phone frame inside icon
+        let pw = size * 0.42;
+        let ph = size * 0.66;
+        let px = cx - pw * 0.36;
+        let py = cy - ph * 0.5;
+        self.draw_rounded_stroke(px, py, pw, ph, 2.6, 1.7, CARD_WHITE, 0.96);
+        // Top speaker dot
+        self.draw_capsule_line(cx - 0.5, py + 2.5, cx + 1.8, py + 2.5, 1.3, CARD_WHITE, 0.9);
+        // Bottom home dot
+        self.draw_circle(px + pw * 0.5, py + ph - 2.6, 1.0, CARD_WHITE, 0.9);
+
+        // Cast / mirror badge overlapping left side of phone frame
+        let bx = px - 3.2;
+        let by = cy - 3.2;
+        self.draw_rounded_card(
+            bx,
+            by,
+            6.4,
+            6.4,
+            1.8,
+            Rgb(42, 122, 246),
+            CARD_WHITE,
+            1.3,
+            CARD_WHITE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        self.draw_circle(bx + 2.2, by + 4.2, 0.9, CARD_WHITE, 1.0);
+    }
+
+    /// Sidebar `Home` house icon centered at `(cx, cy)`.
+    pub fn draw_home_icon(&mut self, cx: f32, cy: f32, inner_bg: Rgb, color: Rgb, opacity: f32) {
+        // Roof triangle
+        let s = self.scale;
+        let scx = cx * s;
+        let scy = cy * s;
+        let ax = scx;
+        let ay = (cy - 8.2) * s;
+        let bx = (cx - 9.2) * s;
+        let by = (cy - 0.5) * s;
+        let tx = (cx + 9.2) * s;
+        let ty = (cy - 0.5) * s;
+
+        let min_x = ((bx - 2.0).floor() as i32).max(0);
+        let max_x = ((tx + 2.0).ceil() as i32).min(self.width as i32 - 1);
+        let min_y = ((ay - 2.0).floor() as i32).max(0);
+        let max_y = ((by + 2.0).ceil() as i32).min(self.height as i32 - 1);
+
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let d = sd_triangle(fx, fy, ax, ay, bx, by, tx, ty) - 0.8 * s;
+                if d < 0.75 {
+                    let cov = (0.5 - d).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, color, cov * opacity);
+                }
+            }
+        }
+        let _ = scx;
+        let _ = scy;
+
+        // Lower house body
+        self.draw_rounded_card(
+            cx - 6.6,
+            cy - 1.5,
+            13.2,
+            9.5,
+            1.8,
+            color,
+            color,
+            0.0,
+            color,
+            0.0,
+            0.0,
+            0.0,
+            opacity,
+        );
+
+        // Door cutout in inner_bg color
+        self.draw_rounded_card(
+            cx - 2.1,
+            cy + 2.2,
+            4.2,
+            6.2,
+            1.0,
+            inner_bg,
+            inner_bg,
+            0.0,
+            inner_bg,
+            0.0,
+            0.0,
+            0.0,
+            opacity,
+        );
+    }
+
+    /// Sidebar `Recordings` video camera icon centered at `(cx, cy)`.
+    pub fn draw_video_cam_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        // Camera body outline on left
+        self.draw_rounded_stroke(cx - 9.0, cy - 5.8, 12.2, 11.6, 2.8, 1.8, color, opacity);
+        // Right lens trapezoid/triangle
+        self.draw_capsule_line(cx + 3.2, cy - 2.2, cx + 8.5, cy - 5.0, 1.8, color, opacity);
+        self.draw_capsule_line(cx + 8.5, cy - 5.0, cx + 8.5, cy + 5.0, 1.8, color, opacity);
+        self.draw_capsule_line(cx + 8.5, cy + 5.0, cx + 3.2, cy + 2.2, 1.8, color, opacity);
+    }
+
+    /// Precision 8-tooth `Settings` / `Mirror Quality` gear icon centered at `(cx, cy)`.
+    pub fn draw_gear_icon(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        inner_bg: Rgb,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        for i in 0..8 {
+            let ang = (i as f32) * std::f32::consts::FRAC_PI_4;
+            let x1 = cx + (radius * 0.55) * ang.cos();
+            let y1 = cy + (radius * 0.55) * ang.sin();
+            let x2 = cx + (radius * 0.98) * ang.cos();
+            let y2 = cy + (radius * 0.98) * ang.sin();
+            self.draw_capsule_line(x1, y1, x2, y2, radius * 0.34, color, opacity);
+        }
+        self.draw_circle(cx, cy, radius * 0.76, color, opacity);
+        self.draw_circle(cx, cy, radius * 0.36, inner_bg, opacity);
+    }
+
+    /// Sidebar `About` circled-`i` icon centered at `(cx, cy)`.
+    pub fn draw_info_circle_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        self.draw_arc_stroke(
+            cx,
+            cy,
+            8.4,
+            -std::f32::consts::PI,
+            std::f32::consts::PI,
+            1.8,
