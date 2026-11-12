@@ -866,3 +866,220 @@ impl UiCanvas {
             -std::f32::consts::PI,
             std::f32::consts::PI,
             1.8,
+            color,
+            opacity,
+        );
+        self.draw_circle(cx, cy - 3.6, 1.15, color, opacity);
+        self.draw_capsule_line(cx, cy - 0.8, cx, cy + 4.2, 1.8, color, opacity);
+    }
+
+    /// `Quick Tools` crossed wrench & screwdriver icon centered at `(cx, cy)`.
+    pub fn draw_wrench_screwdriver_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        // Diagonal 1: Wrench (bottom-left to top-right)
+        self.draw_capsule_line(cx - 6.5, cy + 6.5, cx + 4.5, cy - 4.5, 2.3, color, opacity);
+        self.draw_circle(cx + 5.2, cy - 5.2, 3.2, color, opacity);
+        self.draw_circle(cx + 6.2, cy - 6.2, 1.5, CARD_WHITE, opacity);
+        self.draw_circle(cx - 6.5, cy + 6.5, 1.8, color, opacity);
+
+        // Diagonal 2: Screwdriver (top-left to bottom-right)
+        self.draw_capsule_line(cx - 6.5, cy - 6.5, cx + 6.5, cy + 6.5, 2.0, color, opacity);
+        // Screwdriver handle on bottom-right
+        self.draw_capsule_line(cx + 2.5, cy + 2.5, cx + 6.8, cy + 6.8, 3.6, color, opacity);
+        // Screwdriver tip on top-left
+        self.draw_circle(cx - 6.8, cy - 6.8, 1.5, color, opacity);
+    }
+
+    /// `Quick Tools` folder icon centered at `(cx, cy)`.
+    pub fn draw_folder_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        // Top-left folder tab
+        self.draw_rounded_card(
+            cx - 7.8,
+            cy - 6.2,
+            6.5,
+            3.5,
+            1.4,
+            color,
+            color,
+            0.0,
+            color,
+            0.0,
+            0.0,
+            0.0,
+            opacity,
+        );
+        // Folder main body outline
+        self.draw_rounded_stroke(cx - 7.8, cy - 4.2, 15.6, 10.6, 2.2, 1.7, color, opacity);
+    }
+
+    /// `Quick Tools` filled dark circle with white `?` icon centered at `(cx, cy)`.
+    pub fn draw_help_circle_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        self.draw_circle(cx, cy, 8.8, color, opacity);
+        let q_w = self.measure_text_width("?", 11.0, FontWeight::Bold);
+        let q_cap = self.cap_height(11.0, FontWeight::Bold);
+        self.draw_text_baseline(
+            "?",
+            cx - q_w * 0.5,
+            cy + q_cap * 0.5,
+            11.0,
+            FontWeight::Bold,
+            CARD_WHITE,
+            opacity,
+        );
+    }
+
+    /// Right-pointing chevron `>` centered at `(cx, cy)`.
+    pub fn draw_chevron_right(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        stroke_w: f32,
+        color: Rgb,
+        opacity: f32,
+    ) {
+        self.draw_capsule_line(
+            cx - size * 0.45,
+            cy - size,
+            cx + size * 0.45,
+            cy,
+            stroke_w,
+            color,
+            opacity,
+        );
+        self.draw_capsule_line(
+            cx + size * 0.45,
+            cy,
+            cx - size * 0.45,
+            cy + size,
+            stroke_w,
+            color,
+            opacity,
+        );
+    }
+
+    /// Smartphone outline icon inside the bottom `"Connect your phone via USB"` banner.
+    pub fn draw_phone_outline_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        let w = 18.0;
+        let h = 30.0;
+        let x = cx - w * 0.5;
+        let y = cy - h * 0.5;
+        self.draw_rounded_card(
+            x + 1.0,
+            y + 1.0,
+            w - 2.0,
+            h - 2.0,
+            2.6,
+            CARD_WHITE,
+            color,
+            0.0,
+            color,
+            0.0,
+            0.0,
+            0.0,
+            opacity * 0.85,
+        );
+        self.draw_rounded_stroke(x, y, w, h, 3.4, 2.0, color, opacity);
+        // Top earpiece slit
+        self.draw_capsule_line(cx - 2.2, y + 3.2, cx + 2.2, y + 3.2, 1.5, color, opacity);
+        // Bottom indicator bar
+        self.draw_capsule_line(
+            cx - 2.8,
+            y + h - 3.2,
+            cx + 2.8,
+            y + h - 3.2,
+            1.5,
+            color,
+            opacity,
+        );
+    }
+
+    /// Interactive iOS/macOS style toggle switch at logical `(x, y, w, h)`.
+    pub fn draw_toggle_switch(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        is_on: bool,
+        hover: f32,
+    ) {
+        let track_col = if is_on {
+            APPLE_BLUE.lerp(BLUE_GRAD_TOP, hover * 0.5)
+        } else {
+            Rgb(203, 213, 228).lerp(Rgb(184, 196, 216), hover)
+        };
+        let r = h * 0.5;
+        self.draw_rounded_card(
+            x, y, w, h, r, track_col, track_col, 0.0, SHADOW_SLATE, 0.0, 0.0, 0.0, 1.0,
+        );
+        let pad = 2.5;
+        let thumb_r = (h - pad * 2.0) * 0.5;
+        let thumb_cx = if is_on {
+            x + w - pad - thumb_r
+        } else {
+            x + pad + thumb_r
+        };
+        let thumb_cy = y + h * 0.5;
+        self.draw_rounded_card(
+            thumb_cx - thumb_r,
+            thumb_cy - thumb_r,
+            thumb_r * 2.0,
+            thumb_r * 2.0,
+            thumb_r,
+            CARD_WHITE,
+            CARD_WHITE,
+            0.0,
+            SHADOW_SLATE,
+            0.16,
+            3.0,
+            1.0,
+            1.0,
+        );
+    }
+
+    /// Renders a realistic phone screen with the multi-layered flowing blue wave wallpaper from the reference design.
+    pub fn draw_phone_with_wave_wallpaper(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corner_r: f32,
+        bezel_w: f32,
+        shadow_alpha: f32,
+    ) {
+        // 1. Outer metallic chassis + drop shadow
+        self.draw_rounded_card(
+            x,
+            y,
+            w,
+            h,
+            corner_r,
+            Rgb(14, 18, 30),
+            Rgb(110, 118, 134),
+            1.0,
+            SHADOW_SLATE,
+            shadow_alpha,
+            14.0,
+            6.0,
+            1.0,
+        );
+
+        // 2. Inner OLED screen with multi-layered blue wave shader
+        let sx = x + bezel_w;
+        let sy = y + bezel_w;
+        let sw = (w - bezel_w * 2.0).max(2.0);
+        let sh = (h - bezel_w * 2.0).max(2.0);
+        let sr = (corner_r - bezel_w * 0.85).max(2.0);
+
+        let scale = self.scale;
+        let psx = sx * scale;
+        let psy = sy * scale;
+        let psw = sw * scale;
+        let psh = sh * scale;
+        let psr = sr * scale;
+
+        let cx = psx + psw * 0.5;
+        let cy = psy + psh * 0.5;
+        let half_w = psw * 0.5;
+        let half_h = psh * 0.5;
