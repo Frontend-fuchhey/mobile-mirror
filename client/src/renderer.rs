@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 6/8
+// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -2895,3 +2895,486 @@ fn draw_center_about_help_view(
         FontWeight::Regular,
         TEXT_SECONDARY,
         1.0,
+    );
+
+    let steps = [
+        (
+            "1. Open About Phone",
+            "On your Android phone, open Settings -> About Phone -> Software Information.",
+        ),
+        (
+            "2. Unlock Developer Options",
+            "Tap 'Build Number' (or MIUI/OS Version) 7 times until 'You are now a developer!' appears.",
+        ),
+        (
+            "3. Enable USB Debugging",
+            "Go to Settings -> System -> Developer Options and turn ON 'USB Debugging'.",
+        ),
+        (
+            "4. Connect via USB & Allow",
+            "Plug your phone into this laptop via USB and tap 'Allow' on the phone's RSA prompt.",
+        ),
+    ];
+
+    let rx = card_x + 24.0;
+    let rw = card_w - 54.0;
+    for (idx, (st_title, st_desc)) in steps.iter().enumerate() {
+        let sy = card_y + 88.0 + idx as f32 * 74.0;
+        canvas.draw_rounded_card(
+            rx,
+            sy,
+            rw,
+            64.0,
+            14.0,
+            PILL_NEUTRAL,
+            BORDER_SUBTLE,
+            0.8,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        canvas.draw_circle(rx + 24.0, sy + 32.0, 14.0, APPLE_BLUE_SOFT, 1.0);
+        let num = format!("{}", idx + 1);
+        let nw = canvas.measure_text_width(&num, 13.5, FontWeight::Bold);
+        let n_cap = canvas.cap_height(13.5, FontWeight::Bold);
+        canvas.draw_text_baseline(
+            &num,
+            rx + 24.0 - nw * 0.5,
+            sy + 32.0 + n_cap * 0.5,
+            13.5,
+            FontWeight::Bold,
+            APPLE_BLUE,
+            1.0,
+        );
+
+        canvas.draw_text(
+            st_title,
+            rx + 48.0,
+            sy + 11.0,
+            14.0,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+        let fit_d = canvas.fit_text_to_width(st_desc, rw - 60.0, 12.2, FontWeight::Regular);
+        canvas.draw_text(
+            &fit_d,
+            rx + 48.0,
+            sy + 35.0,
+            12.2,
+            FontWeight::Regular,
+            TEXT_SECONDARY,
+            1.0,
+        );
+    }
+
+    // System Diagnostics Box
+    let diag_y = card_y + 392.0;
+    canvas.draw_rounded_card(
+        rx,
+        diag_y,
+        rw,
+        136.0,
+        16.0,
+        BANNER_USB_BG,
+        BANNER_USB_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    canvas.draw_text(
+        "Mobile Mirror Engine Diagnostics",
+        rx + 18.0,
+        diag_y + 14.0,
+        14.2,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+    let diag1 = format!(
+        "• Connection State: {} ({})",
+        state.headline,
+        state.device_serial.unwrap_or("No USB serial yet")
+    );
+    let diag2 = format!(
+        "• Active Stream Profile: {}  •  {} Mbps {}  •  {} FPS",
+        state.settings.quality.label(),
+        state.settings.bitrate_mbps,
+        if state.settings.cbr_mode { "CBR" } else { "VBR" },
+        state.settings.target_fps
+    );
+    let diag3 = format!(
+        "• Hardware Decoder: {}  •  Shortcuts: F11 Fullscreen, F View, R Record, M Mic",
+        state.settings.hw_backend.label(),
+    );
+    canvas.draw_text(
+        &canvas.fit_text_to_width(&diag1, rw - 36.0, 12.5, FontWeight::Regular),
+        rx + 18.0,
+        diag_y + 44.0,
+        12.5,
+        FontWeight::Regular,
+        TEXT_BODY,
+        1.0,
+    );
+    canvas.draw_text(
+        &canvas.fit_text_to_width(&diag2, rw - 36.0, 12.5, FontWeight::Regular),
+        rx + 18.0,
+        diag_y + 70.0,
+        12.5,
+        FontWeight::Regular,
+        TEXT_BODY,
+        1.0,
+    );
+    canvas.draw_text(
+        &canvas.fit_text_to_width(&diag3, rw - 36.0, 12.5, FontWeight::Regular),
+        rx + 18.0,
+        diag_y + 96.0,
+        12.5,
+        FontWeight::Regular,
+        TEXT_BODY,
+        1.0,
+    );
+
+    // Bottom buttons: [Check USB Device Now]  [Back to Home]
+    let btn_y = (card_y + card_h - 62.0).max(diag_y + 150.0);
+    let test_rect = SDL_FRect {
+        x: rx,
+        y: btn_y,
+        w: 204.0,
+        h: 42.0,
+    };
+    let home_rect = SDL_FRect {
+        x: rx + 216.0,
+        y: btn_y,
+        w: 148.0,
+        h: 42.0,
+    };
+
+    let test_bg = if point_in_rect(mx, my, &test_rect) {
+        BLUE_GRAD_HOVER_TOP
+    } else {
+        APPLE_BLUE
+    };
+    draw_small_pill(canvas, &test_rect, "Check USB Device Now", test_bg, CARD_WHITE);
+    hit_zones.push(HitZone {
+        rect: test_rect,
+        action: UiAction::StartMirroring,
+    });
+
+    let home_bg = if point_in_rect(mx, my, &home_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    draw_small_pill(canvas, &home_rect, "Back to Home", home_bg, TEXT_PRIMARY);
+    hit_zones.push(HitZone {
+        rect: home_rect,
+        action: UiAction::SwitchTab(NavTab::Home),
+    });
+}
+
+fn draw_small_pill(canvas: &mut UiCanvas, rect: &SDL_FRect, label: &str, bg: Rgb, fg: Rgb) {
+    canvas.draw_rounded_card(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        rect.h * 0.5,
+        bg,
+        bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    let tw = canvas.measure_text_width(label, 12.4, FontWeight::Semibold);
+    let cap = canvas.cap_height(12.4, FontWeight::Semibold);
+    canvas.draw_text_baseline(
+        label,
+        rect.x + (rect.w - tw) * 0.5,
+        rect.y + (rect.h + cap) * 0.5,
+        12.4,
+        FontWeight::Semibold,
+        fg,
+        1.0,
+    );
+}
+
+fn format_hh_mm_ss(total_secs: u64) -> String {
+    let hrs = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    format!("{:02}:{:02}:{:02}", hrs, mins, secs)
+}
+
+fn format_rec_timer(rec_elapsed_secs: u64) -> String {
+    let mins = rec_elapsed_secs / 60;
+    let secs = rec_elapsed_secs % 60;
+    format!("{:02}:{:02}", mins, secs)
+}
+
+const TOOLBAR_TITLE_SIZE: f32 = 14.0;
+const TOOLBAR_META_SIZE: f32 = 12.2;
+const TOOLBAR_PILL_FONT_SIZE: f32 = 12.0;
+
+#[allow(clippy::too_many_arguments, non_snake_case)]
+fn draw_live_toolbar_strip_with_Zones(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    y_top: f32,
+    bar_w: f32,
+    is_recording: bool,
+    rec_elapsed_secs: u64,
+    is_mic_enabled: bool,
+    fps: u32,
+    is_window_fullscreen: bool,
+) -> f32 {
+    let s = canvas.scale;
+    let phys_y0 = (y_top * s).round() as i32;
+    let phys_bw = (bar_w * s).round() as i32;
+    let phys_bh = (TOOLBAR_HEIGHT as f32 * s).round() as i32;
+    let div_px = s.floor().max(1.0) as i32;
+
+    canvas.fill_physical_rect(0, phys_y0, phys_bw, phys_bh - div_px, CARD_WHITE);
+    canvas.fill_physical_rect(0, phys_y0 + phys_bh - div_px, phys_bw, div_px, BORDER_SUBTLE);
+
+    let pill_y = y_top + 8.0;
+    let pill_h = 28.0;
+    let cy = y_top + (TOOLBAR_HEIGHT as f32) * 0.5;
+    let is_wide = bar_w >= 540.0;
+
+    // 1. Right-to-Left Compact Controls: [Dash] [Mic] [REC] [—] [□ (F11)] [✕]
+    let close_rect = SDL_FRect {
+        x: (bar_w - 6.0 - 28.0).round(),
+        y: pill_y,
+        w: 28.0,
+        h: pill_h,
+    };
+    let full_rect = SDL_FRect {
+        x: (close_rect.x - 4.0 - 28.0).round(),
+        y: pill_y,
+        w: 28.0,
+        h: pill_h,
+    };
+    let min_rect = SDL_FRect {
+        x: (full_rect.x - 4.0 - 28.0).round(),
+        y: pill_y,
+        w: 28.0,
+        h: pill_h,
+    };
+
+    let rec_label = if is_recording {
+        format_rec_timer(rec_elapsed_secs)
+    } else if is_wide {
+        "Record".to_string()
+    } else {
+        "REC".to_string()
+    };
+    let rec_w = if is_recording {
+        64.0
+    } else if is_wide {
+        76.0
+    } else {
+        56.0
+    };
+    let rec_rect = SDL_FRect {
+        x: (min_rect.x - 5.0 - rec_w).round(),
+        y: pill_y,
+        w: rec_w,
+        h: pill_h,
+    };
+
+    let mic_label = if is_mic_enabled && is_wide {
+        "Mic On"
+    } else {
+        "Mic"
+    };
+    let mic_w = if is_mic_enabled && is_wide { 68.0 } else { 46.0 };
+    let mic_rect = SDL_FRect {
+        x: (rec_rect.x - 5.0 - mic_w).round(),
+        y: pill_y,
+        w: mic_w,
+        h: pill_h,
+    };
+
+    let dash_label = if is_wide { "Dashboard" } else { "Dash" };
+    let dash_w = if is_wide { 92.0 } else { 50.0 };
+    let dash_rect = SDL_FRect {
+        x: (mic_rect.x - 5.0 - dash_w).round(),
+        y: pill_y,
+        w: dash_w,
+        h: pill_h,
+    };
+
+    let first_btn_x = dash_rect.x;
+
+    // Draw Dash pill
+    let dash_bg = if point_in_rect(mx, my, &dash_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    draw_small_pill(canvas, &dash_rect, dash_label, dash_bg, TEXT_PRIMARY);
+    hit_zones.push(HitZone {
+        rect: dash_rect,
+        action: UiAction::ToggleFullscreenMirror,
+    });
+
+    // Draw Mic pill
+    let mic_hover = point_in_rect(mx, my, &mic_rect);
+    let (mic_bg, mic_fg) = if is_mic_enabled {
+        (
+            if mic_hover {
+                APPLE_BLUE_HOVER
+            } else {
+                APPLE_BLUE_SOFT
+            },
+            APPLE_BLUE,
+        )
+    } else {
+        (
+            if mic_hover {
+                PILL_NEUTRAL_HOVER
+            } else {
+                PILL_NEUTRAL
+            },
+            TEXT_PRIMARY,
+        )
+    };
+    draw_small_pill(canvas, &mic_rect, mic_label, mic_bg, mic_fg);
+    hit_zones.push(HitZone {
+        rect: mic_rect,
+        action: UiAction::ToggleMic,
+    });
+
+    // Draw Record pill with status dot
+    let rec_hover = point_in_rect(mx, my, &rec_rect);
+    let (rec_bg, rec_fg) = if is_recording {
+        (
+            if rec_hover {
+                ERROR_BG_HOVER
+            } else {
+                ERROR_BG
+            },
+            ERROR_RED,
+        )
+    } else {
+        (
+            if rec_hover {
+                PILL_NEUTRAL_HOVER
+            } else {
+                PILL_NEUTRAL
+            },
+            TEXT_PRIMARY,
+        )
+    };
+    canvas.draw_rounded_card(
+        rec_rect.x,
+        rec_rect.y,
+        rec_rect.w,
+        rec_rect.h,
+        14.0,
+        rec_bg,
+        rec_bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    let rtw = canvas.measure_text_width(&rec_label, TOOLBAR_PILL_FONT_SIZE, FontWeight::Semibold);
+    let rcap = canvas.cap_height(TOOLBAR_PILL_FONT_SIZE, FontWeight::Semibold);
+    let total_rw = 11.0 + rtw;
+    let rx0 = rec_rect.x + (rec_rect.w - total_rw) * 0.5;
+    canvas.draw_circle(rx0 + 3.5, cy, 3.6, ERROR_RED, 1.0);
+    canvas.draw_text_baseline(
+        &rec_label,
+        rx0 + 11.0,
+        cy + rcap * 0.5,
+        TOOLBAR_PILL_FONT_SIZE,
+        FontWeight::Semibold,
+        rec_fg,
+        1.0,
+    );
+    hit_zones.push(HitZone {
+        rect: rec_rect,
+        action: UiAction::ToggleRecord,
+    });
+
+    // Draw Minimize button `—`
+    let min_bg = if point_in_rect(mx, my, &min_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    canvas.draw_rounded_card(
+        min_rect.x,
+        min_rect.y,
+        min_rect.w,
+        min_rect.h,
+        8.0,
+        min_bg,
+        min_bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    canvas.draw_capsule_line(
+        min_rect.x + 9.0,
+        cy,
+        min_rect.x + 19.0,
+        cy,
+        1.8,
+        TEXT_PRIMARY,
+        0.88,
+    );
+    hit_zones.push(HitZone {
+        rect: min_rect,
+        action: UiAction::StopSession,
+    });
+
+    // Draw Fullscreen / Restore (F11) button `□`
+    let full_hover = point_in_rect(mx, my, &full_rect);
+    let (full_bg, full_fg) = if is_window_fullscreen {
+        (
+            if full_hover {
+                APPLE_BLUE_HOVER
+            } else {
+                APPLE_BLUE_SOFT
+            },
+            APPLE_BLUE,
+        )
+    } else {
+        (
+            if full_hover {
+                PILL_NEUTRAL_HOVER
+            } else {
+                PILL_NEUTRAL
+            },
+            TEXT_PRIMARY,
+        )
+    };
+    canvas.draw_rounded_card(
+        full_rect.x,
+        full_rect.y,
+        full_rect.w,
+        full_rect.h,
+        8.0,
+        full_bg,
+        full_bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
