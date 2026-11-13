@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 2/8
+// [Mobile Mirror] Progressive implementation phase 3/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -964,3 +964,486 @@ impl Sdl3Renderer {
                     self.renderer,
                     sdl_format,
                     SDL_TEXTUREACCESS_STREAMING,
+                    frame.width as i32,
+                    frame.height as i32,
+                );
+                if self.texture.is_null() {
+                    return Err(format!(
+                        "SDL_CreateTexture failed: {}",
+                        Self::last_error(&self.api)
+                    ));
+                }
+                self.tex_width = frame.width;
+                self.tex_height = frame.height;
+                self.tex_layout = Some(frame.layout);
+            }
+
+            let updated = match frame.layout {
+                PixelLayout::Nv12 => (self.api.sdl_update_nv_texture)(
+                    self.texture,
+                    ptr::null(),
+                    frame.y_plane.as_ptr(),
+                    frame.y_pitch,
+                    frame.u_or_uv_plane.as_ptr(),
+                    frame.u_or_uv_pitch,
+                ),
+                PixelLayout::Yuv420p => {
+                    let v_plane = frame.v_plane.ok_or("Missing V plane for YUV420P")?;
+                    (self.api.sdl_update_yuv_texture)(
+                        self.texture,
+                        ptr::null(),
+                        frame.y_plane.as_ptr(),
+                        frame.y_pitch,
+                        frame.u_or_uv_plane.as_ptr(),
+                        frame.u_or_uv_pitch,
+                        v_plane.as_ptr(),
+                        frame.v_pitch,
+                    )
+                }
+            };
+
+            if !updated {
+                return Err(format!(
+                    "SDL texture upload failed: {}",
+                    Self::last_error(&self.api)
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    /// Legacy startup screen wrapper that renders the full Bento Dashboard in its default state.
+    pub fn render_startup_screen(
+        &mut self,
+        headline: &str,
+        subtext: &str,
+        is_connecting: bool,
+        is_warning: bool,
+    ) {
+        let default_settings = AppSettings::default();
+        let recs = self.cached_recordings.clone();
+        let state = DashboardViewState {
+            active_tab: self.active_tab,
+            settings: &default_settings,
+            headline,
+            subtext,
+            is_connecting,
+            is_warning,
+            is_mirroring: false,
+            device_serial: None,
+            is_recording: false,
+            rec_elapsed_secs: 0,
+            last_saved_recording: None,
+            stream_width: 0,
+            stream_height: 0,
+            fps: 60,
+            recordings: &recs,
+            status_toast: None,
+        };
+        self.render_dashboard(&state);
+    }
+
+    pub fn poll_events(&mut self) -> (bool, bool, bool) {
+        let actions = self.poll_dashboard_actions();
+        let mut should_run = true;
+        let mut toggle_rec = false;
+        let mut toggle_mic = false;
+        for a in actions {
+            match a {
+                UiAction::Quit => should_run = false,
+                UiAction::ToggleRecord => toggle_rec = true,
+                UiAction::ToggleMic => toggle_mic = true,
+                _ => {}
+            }
+        }
+        (should_run, toggle_rec, toggle_mic)
+    }
+
+    pub fn render_frame(
+        &mut self,
+        frame: &DecodedFrameView<'_>,
+        is_recording: bool,
+        rec_elapsed_secs: u64,
+        is_mic_enabled: bool,
+        fps: u32,
+    ) -> Result<(), String> {
+        self.upload_video_frame(frame)?;
+        let mut settings = AppSettings::default();
+        settings.mic_enabled = is_mic_enabled;
+        let recs = self.cached_recordings.clone();
+        let state = DashboardViewState {
+            active_tab: self.active_tab,
+            settings: &settings,
+            headline: "Connected",
+            subtext: "Live USB stream active",
+            is_connecting: false,
+            is_warning: false,
+            is_mirroring: true,
+            device_serial: None,
+            is_recording,
+            rec_elapsed_secs,
+            last_saved_recording: None,
+            stream_width: frame.width,
+            stream_height: frame.height,
+            fps,
+            recordings: &recs,
+            status_toast: None,
+        };
+        self.render_dashboard(&state);
+        Ok(())
+    }
+
+    pub fn present_cached_frame(
+        &mut self,
+        is_recording: bool,
+        rec_elapsed_secs: u64,
+        is_mic_enabled: bool,
+        fps: u32,
+    ) -> Result<(), String> {
+        let mut settings = AppSettings::default();
+        settings.mic_enabled = is_mic_enabled;
+        let recs = self.cached_recordings.clone();
+        let state = DashboardViewState {
+            active_tab: self.active_tab,
+            settings: &settings,
+            headline: "Connected",
+            subtext: "Live USB stream active",
+            is_connecting: false,
+            is_warning: false,
+            is_mirroring: !self.texture.is_null(),
+            device_serial: None,
+            is_recording,
+            rec_elapsed_secs,
+            last_saved_recording: None,
+            stream_width: self.tex_width,
+            stream_height: self.tex_height,
+            fps,
+            recordings: &recs,
+            status_toast: None,
+        };
+        self.render_dashboard(&state);
+        Ok(())
+    }
+
+    fn upload_ui_canvas_texture(&mut self) {
+        unsafe {
+            let w = self.ui_canvas.width;
+            let h = self.ui_canvas.height;
+            if w == 0 || h == 0 {
+                return;
+            }
+            if self.ui_texture.is_null() || self.ui_tex_w != w || self.ui_tex_h != h {
+                if !self.ui_texture.is_null() {
+                    (self.api.sdl_destroy_texture)(self.ui_texture);
+                    self.ui_texture = ptr::null_mut();
+                }
+                self.ui_texture = (self.api.sdl_create_texture)(
+                    self.renderer,
+                    SDL_PIXELFORMAT_ARGB8888,
+                    SDL_TEXTUREACCESS_STREAMING,
+                    w as i32,
+                    h as i32,
+                );
+                self.ui_tex_w = w;
+                self.ui_tex_h = h;
+            }
+
+            if !self.ui_texture.is_null() {
+                let _ = (self.api.sdl_update_texture)(
+                    self.ui_texture,
+                    ptr::null(),
+                    self.ui_canvas.pixels.as_ptr() as *const c_void,
+                    (w * 4) as i32,
+                );
+            }
+        }
+    }
+
+    unsafe fn last_error(api: &Sdl3Api) -> String {
+        let err_ptr = (api.sdl_get_error)();
+        if err_ptr.is_null() {
+            "unknown SDL3 error".to_string()
+        } else {
+            CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
+fn compute_aspect_rect(
+    avail_x: f32,
+    avail_y: f32,
+    avail_w: f32,
+    avail_h: f32,
+    tex_w: u32,
+    tex_h: u32,
+) -> SDL_FRect {
+    if tex_w > 0 && tex_h > 0 {
+        let scale = (avail_w / tex_w as f32).min(avail_h / tex_h as f32);
+        let vw = (tex_w as f32 * scale).round().min(avail_w);
+        let vh = (tex_h as f32 * scale).round().min(avail_h);
+        SDL_FRect {
+            x: avail_x + ((avail_w - vw) * 0.5).floor(),
+            y: avail_y + ((avail_h - vh) * 0.5).floor(),
+            w: vw,
+            h: vh,
+        }
+    } else {
+        SDL_FRect {
+            x: avail_x,
+            y: avail_y,
+            w: avail_w,
+            h: avail_h,
+        }
+    }
+}
+
+// ============================================================================
+// Full Bento Dashboard Canvas Renderer (Picture-Similar to Reference Screenshot)
+// ============================================================================
+
+/// Renders the complete Bento Dashboard onto `canvas` and populates interactive `hit_zones`.
+/// Returns `Some(SDL_FRect)` for the video viewport if `Home` tab is showing a live mirror stream.
+fn draw_bento_dashboard_canvas(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    state: &DashboardViewState<'_>,
+) -> Option<SDL_FRect> {
+    let win_w = canvas.logical_width;
+    let win_h = canvas.logical_height;
+
+    // 1. Main Workspace Cool-Tinted Alabaster Background (#F3F6FD)
+    canvas.clear(BG_ALABASTER);
+
+    // 2. Left Sidebar Surface (x = 0..192, y = 54..win_h)
+    let sidebar_w = 192.0;
+    canvas.fill_rect(
+        0,
+        HEADER_BAR_HEIGHT as i32,
+        sidebar_w as i32,
+        (win_h - HEADER_BAR_HEIGHT) as i32,
+        BG_SIDEBAR,
+    );
+    // Crisp 1px vertical divider between sidebar and main workspace
+    canvas.fill_rect(
+        sidebar_w as i32,
+        HEADER_BAR_HEIGHT as i32,
+        1,
+        (win_h - HEADER_BAR_HEIGHT) as i32,
+        BORDER_SUBTLE,
+    );
+
+    // 3. Top Application Header Bar (y = 0..54)
+    canvas.fill_rect(0, 0, win_w as i32, HEADER_BAR_HEIGHT as i32, BG_HEADER);
+    canvas.fill_rect(0, HEADER_BAR_HEIGHT as i32 - 1, win_w as i32, 1, BORDER_SUBTLE);
+
+    // Top-left Brand Icon + "Mobile Mirror" title
+    canvas.draw_app_brand_icon(24.0, 12.0, 30.0);
+    let hdr_cap = canvas.cap_height(16.0, FontWeight::Bold);
+    canvas.draw_text_baseline(
+        "Mobile Mirror",
+        66.0,
+        (HEADER_BAR_HEIGHT + hdr_cap) * 0.5,
+        16.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    // Top-right Window Controls (—  □  ✕) matching reference screenshot
+    let wc_y = 11.0;
+    let wc_w = 36.0;
+    let wc_h = 32.0;
+    let close_x = win_w - 48.0;
+    let max_x = close_x - 42.0;
+    let min_x = max_x - 42.0;
+
+    let min_rect = SDL_FRect {
+        x: min_x,
+        y: wc_y,
+        w: wc_w,
+        h: wc_h,
+    };
+    let max_rect = SDL_FRect {
+        x: max_x,
+        y: wc_y,
+        w: wc_w,
+        h: wc_h,
+    };
+    let close_rect = SDL_FRect {
+        x: close_x,
+        y: wc_y,
+        w: wc_w,
+        h: wc_h,
+    };
+
+    if point_in_rect(mx, my, &min_rect) {
+        canvas.draw_rounded_card(
+            min_rect.x,
+            min_rect.y,
+            min_rect.w,
+            min_rect.h,
+            8.0,
+            PILL_NEUTRAL_HOVER,
+            PILL_NEUTRAL_HOVER,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    }
+    if point_in_rect(mx, my, &max_rect) {
+        canvas.draw_rounded_card(
+            max_rect.x,
+            max_rect.y,
+            max_rect.w,
+            max_rect.h,
+            8.0,
+            PILL_NEUTRAL_HOVER,
+            PILL_NEUTRAL_HOVER,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    }
+    let close_hover = point_in_rect(mx, my, &close_rect);
+    if close_hover {
+        canvas.draw_rounded_card(
+            close_rect.x,
+            close_rect.y,
+            close_rect.w,
+            close_rect.h,
+            8.0,
+            ERROR_BG_HOVER,
+            ERROR_BG_HOVER,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    }
+
+    let wc_cy = HEADER_BAR_HEIGHT * 0.5;
+    // Minimize `—`
+    canvas.draw_capsule_line(
+        min_x + 12.0,
+        wc_cy,
+        min_x + 24.0,
+        wc_cy,
+        1.8,
+        TEXT_PRIMARY,
+        0.88,
+    );
+    // Maximize `□`
+    canvas.draw_rounded_stroke(
+        max_x + 12.0,
+        wc_cy - 5.5,
+        11.0,
+        11.0,
+        2.0,
+        1.7,
+        TEXT_PRIMARY,
+        0.88,
+    );
+    // Close `✕`
+    let close_col = if close_hover { ERROR_RED } else { TEXT_PRIMARY };
+    canvas.draw_capsule_line(
+        close_x + 13.0,
+        wc_cy - 5.0,
+        close_x + 23.0,
+        wc_cy + 5.0,
+        1.8,
+        close_col,
+        0.9,
+    );
+    canvas.draw_capsule_line(
+        close_x + 23.0,
+        wc_cy - 5.0,
+        close_x + 13.0,
+        wc_cy + 5.0,
+        1.8,
+        close_col,
+        0.9,
+    );
+
+    hit_zones.push(HitZone {
+        rect: min_rect,
+        action: UiAction::StopSession,
+    });
+    hit_zones.push(HitZone {
+        rect: max_rect,
+        action: UiAction::MaximizeRestoreWindow,
+    });
+    hit_zones.push(HitZone {
+        rect: close_rect,
+        action: UiAction::Quit,
+    });
+
+    // 4. Left Sidebar Navigation Items (Home, Recordings, Settings, About)
+    let nav_items = [
+        (NavTab::Home, "Home", 82.0, 50.0),
+        (NavTab::Recordings, "Recordings", 142.0, 46.0),
+        (NavTab::Settings, "Settings", 198.0, 46.0),
+        (NavTab::About, "About", 254.0, 46.0),
+    ];
+
+    for (tab, label, ny, nh) in nav_items {
+        let nav_rect = SDL_FRect {
+            x: 12.0,
+            y: ny,
+            w: sidebar_w - 24.0,
+            h: nh,
+        };
+        let is_active = state.active_tab == tab;
+        let is_hover = point_in_rect(mx, my, &nav_rect);
+
+        if is_active {
+            let bg = if is_hover {
+                APPLE_BLUE_HOVER
+            } else {
+                APPLE_BLUE_SOFT
+            };
+            canvas.draw_rounded_card(
+                nav_rect.x,
+                nav_rect.y,
+                nav_rect.w,
+                nav_rect.h,
+                13.0,
+                bg,
+                bg,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+        } else if is_hover {
+            canvas.draw_rounded_card(
+                nav_rect.x,
+                nav_rect.y,
+                nav_rect.w,
+                nav_rect.h,
+                12.0,
+                PILL_NEUTRAL_HOVER,
+                PILL_NEUTRAL_HOVER,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                0.75,
+            );
+        }
+
+        let icon_cx = 38.0;
+        let icon_cy = ny + nh * 0.5;
+        let fg = if is_active { APPLE_BLUE } else { TEXT_BODY };
