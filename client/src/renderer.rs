@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 4/8
+// [Mobile Mirror] Progressive implementation phase 5/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -1930,3 +1930,485 @@ fn draw_right_column_cards(
                 19.0,
                 PILL_NEUTRAL_HOVER,
                 PILL_NEUTRAL_HOVER,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+        }
+
+        // Subtle divider between unselected segments
+        if idx == 1 && state.settings.quality == MirrorQuality::Auto {
+            canvas.fill_rect(
+                (q_rect.x + q_rect.w) as i32,
+                (seg_y + 11.0) as i32,
+                1,
+                20,
+                BORDER_SUBTLE,
+            );
+        } else if idx == 0 && state.settings.quality == MirrorQuality::Fhd {
+            canvas.fill_rect(
+                (q_rect.x + q_rect.w) as i32,
+                (seg_y + 11.0) as i32,
+                1,
+                20,
+                BORDER_SUBTLE,
+            );
+        }
+
+        let lbl = q.label();
+        let weight = if is_sel {
+            FontWeight::Semibold
+        } else {
+            FontWeight::Regular
+        };
+        let fg = if is_sel { CARD_WHITE } else { TEXT_PRIMARY };
+        let lw = canvas.measure_text_width(lbl, 13.8, weight);
+        let l_cap = canvas.cap_height(13.8, weight);
+        canvas.draw_text_baseline(
+            lbl,
+            q_rect.x + (q_rect.w - lw) * 0.5,
+            q_rect.y + (q_rect.h + l_cap) * 0.5,
+            13.8,
+            weight,
+            fg,
+            1.0,
+        );
+
+        hit_zones.push(HitZone {
+            rect: q_rect,
+            action: UiAction::SelectQuality(q),
+        });
+    }
+
+    let q_caption = canvas.fit_text_to_width(
+        state.settings.quality.caption(),
+        col_w - 24.0,
+        12.2,
+        FontWeight::Regular,
+    );
+    canvas.draw_text_centered(
+        &q_caption,
+        col_cx,
+        qual_y + 110.0,
+        12.2,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+
+    // ========================================================================
+    // Card 3: Quick Tools Card (y = 490, h = 216)
+    // ========================================================================
+    let qt_y = 490.0;
+    let qt_h = 216.0;
+    canvas.draw_rounded_card(
+        col_x,
+        qt_y,
+        col_w,
+        qt_h,
+        20.0,
+        CARD_WHITE,
+        CARD_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.05,
+        18.0,
+        5.0,
+        1.0,
+    );
+
+    let qt_hdr_cy = qt_y + 30.0;
+    canvas.draw_wrench_screwdriver_icon(col_x + 28.0, qt_hdr_cy, TEXT_BODY, 1.0);
+    canvas.draw_text_baseline(
+        "Quick Tools",
+        col_x + 44.0,
+        qt_hdr_cy + hdr_cap * 0.5,
+        16.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    let tool_rows = [
+        (0, "Open Recordings", qt_y + 56.0, UiAction::OpenRecordingsFolder),
+        (1, "Settings", qt_y + 106.0, UiAction::SwitchTab(NavTab::Settings)),
+        (2, "Help & Support", qt_y + 156.0, UiAction::SwitchTab(NavTab::About)),
+    ];
+
+    for (icon_kind, label, ry, action) in tool_rows {
+        let r_rect = SDL_FRect {
+            x: col_x + 18.0,
+            y: ry,
+            w: col_w - 36.0,
+            h: 42.0,
+        };
+        let is_hov = point_in_rect(mx, my, &r_rect);
+        let row_bg = if is_hov {
+            PILL_NEUTRAL_HOVER
+        } else {
+            PILL_NEUTRAL
+        };
+        canvas.draw_rounded_card(
+            r_rect.x,
+            r_rect.y,
+            r_rect.w,
+            r_rect.h,
+            12.0,
+            row_bg,
+            row_bg,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        let r_cy = r_rect.y + r_rect.h * 0.5;
+        let icon_cx = r_rect.x + 20.0;
+        match icon_kind {
+            0 => canvas.draw_folder_icon(icon_cx, r_cy, TEXT_BODY, 1.0),
+            1 => canvas.draw_gear_icon(icon_cx, r_cy, 7.6, row_bg, TEXT_BODY, 1.0),
+            _ => canvas.draw_help_circle_icon(icon_cx, r_cy, TEXT_BODY, 1.0),
+        }
+
+        let r_cap = canvas.cap_height(13.6, FontWeight::Semibold);
+        canvas.draw_text_baseline(
+            label,
+            r_rect.x + 38.0,
+            r_cy + r_cap * 0.5,
+            13.6,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+
+        canvas.draw_chevron_right(
+            r_rect.x + r_rect.w - 16.0,
+            r_cy,
+            4.4,
+            1.7,
+            TEXT_SECONDARY,
+            0.9,
+        );
+
+        hit_zones.push(HitZone {
+            rect: r_rect,
+            action,
+        });
+    }
+}
+
+/// Renders the Center Card when on `NavTab::Home` (Hero Illustration + Title + "Start Mirroring" + Bottom USB Banner).
+#[allow(clippy::too_many_arguments)]
+fn draw_center_home_hero_view(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    card_x: f32,
+    card_y: f32,
+    card_w: f32,
+    card_h: f32,
+    state: &DashboardViewState<'_>,
+) {
+    let cx = card_x + card_w * 0.5;
+
+    // 1. Hero 3D Laptop + Signal Waves + Smartphone Illustration
+    canvas.draw_hero_laptop_phone_illustration(cx, card_y + 30.0, state.is_connecting);
+
+    // 2. Hero Title: "Mobile Mirror"
+    canvas.draw_text_centered(
+        "Mobile Mirror",
+        cx,
+        card_y + 292.0,
+        29.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    // 3. Hero Subtitle: "Mirror and record your phone screen on your laptop"
+    let subtitle = "Mirror and record your phone screen on your laptop";
+    let fitted_sub = canvas.fit_text_to_width(subtitle, card_w - 40.0, 15.0, FontWeight::Regular);
+    canvas.draw_text_centered(
+        &fitted_sub,
+        cx,
+        card_y + 344.0,
+        15.0,
+        FontWeight::Regular,
+        TEXT_BODY,
+        1.0,
+    );
+
+    // 4. Primary CTA Pill Button: "[ ▶  Start Mirroring ]"
+    let btn_w = 256.0;
+    let btn_h = 56.0;
+    let btn_rect = SDL_FRect {
+        x: (cx - btn_w * 0.5).round(),
+        y: (card_y + 398.0).round(),
+        w: btn_w,
+        h: btn_h,
+    };
+    let btn_hover = point_in_rect(mx, my, &btn_rect);
+    let (grad_top, grad_bot) = if btn_hover {
+        (BLUE_GRAD_HOVER_TOP, BLUE_GRAD_HOVER_BOT)
+    } else {
+        (BLUE_GRAD_TOP, BLUE_GRAD_BOT)
+    };
+
+    canvas.draw_gradient_rounded_card(
+        btn_rect.x,
+        btn_rect.y,
+        btn_rect.w,
+        btn_rect.h,
+        btn_h * 0.5,
+        grad_top,
+        grad_bot,
+        APPLE_BLUE,
+        0.0,
+        APPLE_BLUE,
+        0.28,
+        18.0,
+        6.0,
+        1.0,
+    );
+
+    let btn_label = if state.is_connecting {
+        "Connecting..."
+    } else {
+        "Start Mirroring"
+    };
+    let bl_w = canvas.measure_text_width(btn_label, 15.8, FontWeight::Semibold);
+    let bl_cap = canvas.cap_height(15.8, FontWeight::Semibold);
+    let total_w = 22.0 + bl_w;
+    let start_x = btn_rect.x + (btn_rect.w - total_w) * 0.5;
+    let btn_cy = btn_rect.y + btn_rect.h * 0.5;
+
+    canvas.draw_play_icon(start_x + 6.0, btn_cy, 11.5, CARD_WHITE, 1.0);
+    canvas.draw_text_baseline(
+        btn_label,
+        start_x + 22.0,
+        btn_cy + bl_cap * 0.5,
+        15.8,
+        FontWeight::Semibold,
+        CARD_WHITE,
+        1.0,
+    );
+
+    hit_zones.push(HitZone {
+        rect: btn_rect,
+        action: UiAction::StartMirroring,
+    });
+
+    // 5. Bottom Info Banner ("Connect your phone via USB" + "How to Enable? >")
+    let banner_h = 84.0;
+    let banner_x = card_x + 18.0;
+    let banner_w = (card_w - 36.0).max(260.0);
+    let banner_y = (card_y + card_h - banner_h - 22.0).max(btn_rect.y + btn_rect.h + 22.0);
+
+    canvas.draw_rounded_card(
+        banner_x,
+        banner_y,
+        banner_w,
+        banner_h,
+        16.0,
+        BANNER_USB_BG,
+        BANNER_USB_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    let b_cy = banner_y + banner_h * 0.5;
+    canvas.draw_phone_outline_icon(banner_x + 28.0, b_cy, TEXT_BODY, 1.0);
+
+    // Right link button: "How to Enable? >"
+    let link_label = "How to Enable?";
+    let link_w = canvas.measure_text_width(link_label, 12.8, FontWeight::Semibold);
+    let link_rect = SDL_FRect {
+        x: banner_x + banner_w - link_w - 28.0,
+        y: banner_y + 20.0,
+        w: link_w + 22.0,
+        h: 44.0,
+    };
+    let link_hover = point_in_rect(mx, my, &link_rect);
+    let link_col = if link_hover {
+        BLUE_GRAD_HOVER_BOT
+    } else {
+        APPLE_BLUE
+    };
+    let link_cap = canvas.cap_height(12.8, FontWeight::Semibold);
+    canvas.draw_text_baseline(
+        link_label,
+        link_rect.x + 2.0,
+        b_cy + link_cap * 0.5,
+        12.8,
+        FontWeight::Semibold,
+        link_col,
+        1.0,
+    );
+    canvas.draw_chevron_right(
+        link_rect.x + link_w + 11.0,
+        b_cy,
+        4.2,
+        1.7,
+        link_col,
+        1.0,
+    );
+    hit_zones.push(HitZone {
+        rect: link_rect,
+        action: UiAction::SwitchTab(NavTab::About),
+    });
+
+    // Middle text lines inside Banner
+    let text_x = banner_x + 52.0;
+    let max_text_w = (link_rect.x - text_x - 8.0).max(120.0);
+    let title_color = if state.is_warning {
+        WARNING_AMBER
+    } else if state.is_connecting {
+        APPLE_BLUE
+    } else {
+        TEXT_PRIMARY
+    };
+    let line1 = canvas.fit_text_to_width(state.headline, max_text_w, 14.2, FontWeight::Bold);
+    let line2 = canvas.fit_text_to_width(state.subtext, max_text_w, 12.4, FontWeight::Regular);
+
+    canvas.draw_text(
+        &line1,
+        text_x,
+        banner_y + 20.0,
+        14.2,
+        FontWeight::Bold,
+        title_color,
+        1.0,
+    );
+    canvas.draw_text(
+        &line2,
+        text_x,
+        banner_y + 46.0,
+        12.4,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+}
+
+/// Renders the Live Mirroring stage inside the Center Card when an Android stream is active.
+#[allow(clippy::too_many_arguments)]
+fn draw_center_live_mirror_view(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    card_x: f32,
+    card_y: f32,
+    card_w: f32,
+    card_h: f32,
+    state: &DashboardViewState<'_>,
+) -> SDL_FRect {
+    // Top control strip inside Center Card
+    let bar_h = 52.0;
+    let bar_cy = card_y + bar_h * 0.5;
+
+    canvas.draw_circle(card_x + 24.0, bar_cy, 5.0, LIVE_GREEN, 1.0);
+    let meta = format!(
+        "Live Mirror  •  {}×{}  •  {} FPS",
+        state.stream_width, state.stream_height, state.fps
+    );
+    let m_cap = canvas.cap_height(13.8, FontWeight::Semibold);
+    canvas.draw_text_baseline(
+        &meta,
+        card_x + 38.0,
+        bar_cy + m_cap * 0.5,
+        13.8,
+        FontWeight::Semibold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    // Right control pills inside Center Card header: [Mic] [Compact] [F11 Full] [Stop]
+    let stop_rect = SDL_FRect {
+        x: card_x + card_w - 86.0,
+        y: card_y + 11.0,
+        w: 70.0,
+        h: 30.0,
+    };
+    let f11_rect = SDL_FRect {
+        x: stop_rect.x - 94.0,
+        y: card_y + 11.0,
+        w: 88.0,
+        h: 30.0,
+    };
+    let full_rect = SDL_FRect {
+        x: f11_rect.x - 86.0,
+        y: card_y + 11.0,
+        w: 80.0,
+        h: 30.0,
+    };
+    let mic_rect = SDL_FRect {
+        x: full_rect.x - 86.0,
+        y: card_y + 11.0,
+        w: 80.0,
+        h: 30.0,
+    };
+
+    // Mic pill
+    let mic_bg = if state.settings.mic_enabled {
+        APPLE_BLUE_SOFT
+    } else if point_in_rect(mx, my, &mic_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    let mic_fg = if state.settings.mic_enabled {
+        APPLE_BLUE
+    } else {
+        TEXT_PRIMARY
+    };
+    let mic_lbl = if state.settings.mic_enabled {
+        "Mic: On"
+    } else {
+        "Mic: Off"
+    };
+    draw_small_pill(canvas, &mic_rect, mic_lbl, mic_bg, mic_fg);
+    hit_zones.push(HitZone {
+        rect: mic_rect,
+        action: UiAction::ToggleMic,
+    });
+
+    // Compact Phone Window pill
+    let full_bg = if point_in_rect(mx, my, &full_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    draw_small_pill(canvas, &full_rect, "Expand", full_bg, TEXT_PRIMARY);
+    hit_zones.push(HitZone {
+        rect: full_rect,
+        action: UiAction::ToggleFullscreenMirror,
+    });
+
+    // True Fullscreen (F11) pill
+    let f11_bg = if point_in_rect(mx, my, &f11_rect) {
+        APPLE_BLUE_HOVER
+    } else {
+        APPLE_BLUE_SOFT
+    };
+    draw_small_pill(canvas, &f11_rect, "F11 Full", f11_bg, APPLE_BLUE);
+    hit_zones.push(HitZone {
+        rect: f11_rect,
+        action: UiAction::ToggleFullscreenMirror,
+    });
+
+    // Disconnect pill
+    let stop_bg = if point_in_rect(mx, my, &stop_rect) {
+        ERROR_BG_HOVER
+    } else {
+        ERROR_BG
