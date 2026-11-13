@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 7/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -3378,3 +3377,486 @@ fn draw_live_toolbar_strip_with_Zones(
         0.0,
         SHADOW_SLATE,
         0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    if is_window_fullscreen {
+        // Restore / Exit-Fullscreen double-frame icon
+        canvas.draw_rounded_stroke(
+            full_rect.x + 10.5,
+            cy - 5.5,
+            8.5,
+            8.5,
+            1.6,
+            1.5,
+            full_fg,
+            0.82,
+        );
+        canvas.draw_rounded_card(
+            full_rect.x + 8.5,
+            cy - 3.0,
+            8.5,
+            8.5,
+            1.6,
+            full_bg,
+            full_fg,
+            1.5,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    } else {
+        canvas.draw_rounded_stroke(
+            full_rect.x + 9.0,
+            cy - 5.0,
+            10.0,
+            10.0,
+            2.0,
+            1.7,
+            full_fg,
+            0.88,
+        );
+    }
+    hit_zones.push(HitZone {
+        rect: full_rect,
+        action: UiAction::ToggleFullscreenMirror,
+    });
+
+    // Draw Close / Disconnect button `✕`
+    let close_hover = point_in_rect(mx, my, &close_rect);
+    let close_bg = if close_hover {
+        ERROR_BG_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    let close_fg = if close_hover { ERROR_RED } else { TEXT_PRIMARY };
+    canvas.draw_rounded_card(
+        close_rect.x,
+        close_rect.y,
+        close_rect.w,
+        close_rect.h,
+        8.0,
+        close_bg,
+        close_bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    canvas.draw_capsule_line(
+        close_rect.x + 9.5,
+        cy - 4.5,
+        close_rect.x + 18.5,
+        cy + 4.5,
+        1.8,
+        close_fg,
+        0.92,
+    );
+    canvas.draw_capsule_line(
+        close_rect.x + 18.5,
+        cy - 4.5,
+        close_rect.x + 9.5,
+        cy + 4.5,
+        1.8,
+        close_fg,
+        0.92,
+    );
+    hit_zones.push(HitZone {
+        rect: close_rect,
+        action: UiAction::StopMirroring,
+    });
+
+    // 2. Left Draggable Status Section: Green Live Dot + Title (if wide) + FPS badge
+    let dot_cx = 14.0;
+    canvas.draw_circle(dot_cx, cy, 4.6, LIVE_GREEN, 1.0);
+
+    let mut cur_x = 24.0;
+    if bar_w >= 540.0 {
+        let title_cap = canvas.cap_height(TOOLBAR_TITLE_SIZE, FontWeight::Semibold);
+        canvas.draw_text_baseline(
+            "Mobile Mirror",
+            cur_x,
+            cy + title_cap * 0.5,
+            TOOLBAR_TITLE_SIZE,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+        cur_x +=
+            canvas.measure_text_width("Mobile Mirror", TOOLBAR_TITLE_SIZE, FontWeight::Semibold)
+                + 10.0;
+    }
+
+    let fps_val = if fps > 0 { fps } else { 60 };
+    let fps_label = format!("{} FPS", fps_val);
+    let fps_w = canvas.measure_text_width(&fps_label, TOOLBAR_META_SIZE, FontWeight::Semibold);
+    if cur_x + fps_w + 6.0 <= first_btn_x {
+        let fps_cap = canvas.cap_height(TOOLBAR_META_SIZE, FontWeight::Semibold);
+        canvas.draw_text_baseline(
+            &fps_label,
+            cur_x,
+            cy + fps_cap * 0.5,
+            TOOLBAR_META_SIZE,
+            FontWeight::Semibold,
+            if bar_w >= 540.0 {
+                TEXT_SECONDARY
+            } else {
+                TEXT_PRIMARY
+            },
+            1.0,
+        );
+        cur_x += fps_w + 12.0;
+    }
+
+    if bar_w >= 680.0 {
+        let f11_hint = if is_window_fullscreen {
+            "Press F11 or Esc to exit Fullscreen"
+        } else {
+            "Press F11 for Fullscreen"
+        };
+        let hw = canvas.measure_text_width(f11_hint, 11.8, FontWeight::Regular);
+        if cur_x + hw + 10.0 <= first_btn_x {
+            let hcap = canvas.cap_height(11.8, FontWeight::Regular);
+            canvas.draw_text_baseline(
+                f11_hint,
+                cur_x,
+                cy + hcap * 0.5,
+                11.8,
+                FontWeight::Regular,
+                TEXT_SECONDARY,
+                1.0,
+            );
+        }
+    }
+
+    first_btn_x
+}
+
+/// Renders the `44px` logical Live Mirroring Top Control Bar at vertical offset `y_top`.
+pub fn draw_live_toolbar_strip(
+    canvas: &mut UiCanvas,
+    y_top: f32,
+    bar_w: f32,
+    is_recording: bool,
+    rec_elapsed_secs: u64,
+    is_mic_enabled: bool,
+    fps: u32,
+) {
+    let mut zones = Vec::new();
+    let _ = draw_live_toolbar_strip_with_Zones(
+        canvas,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        y_top,
+        bar_w,
+        is_recording,
+        rec_elapsed_secs,
+        is_mic_enabled,
+        fps,
+        false,
+    );
+}
+
+/// Legacy compatibility entry point that renders the Bento Dashboard onto `canvas`.
+pub fn draw_startup_screen_canvas(
+    canvas: &mut UiCanvas,
+    headline: &str,
+    subtext: &str,
+    is_connecting: bool,
+    is_warning: bool,
+) {
+    let default_settings = AppSettings::default();
+    let state = DashboardViewState {
+        active_tab: NavTab::Home,
+        settings: &default_settings,
+        headline,
+        subtext,
+        is_connecting,
+        is_warning,
+        is_mirroring: false,
+        device_serial: None,
+        is_recording: false,
+        rec_elapsed_secs: 0,
+        last_saved_recording: None,
+        stream_width: 0,
+        stream_height: 0,
+        fps: 60,
+        recordings: &[],
+        status_toast: None,
+    };
+    let mut zones = Vec::new();
+    let _ = draw_bento_dashboard_canvas(canvas, &mut zones, -1000.0, -1000.0, &state);
+}
+
+/// Renders and saves lossless PNG preview snapshots of the "Mobile Mirror" Bento Dashboard states
+/// (`ui_dashboard_home.png`, `ui_dashboard_settings.png`, `ui_startup_waiting.png`).
+pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+
+    let default_settings = AppSettings::default();
+    let mut zones = Vec::new();
+
+    // 1. Main Home Dashboard (1024 x 698 — exact match to reference screenshot)
+    let mut canvas_home = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
+    let state_home = DashboardViewState {
+        active_tab: NavTab::Home,
+        settings: &default_settings,
+        headline: "Connect your phone via USB",
+        subtext: "Make sure USB debugging is enabled on your Android device.",
+        is_connecting: false,
+        is_warning: false,
+        is_mirroring: false,
+        device_serial: None,
+        is_recording: false,
+        rec_elapsed_secs: 0,
+        last_saved_recording: None,
+        stream_width: 0,
+        stream_height: 0,
+        fps: 60,
+        recordings: &[],
+        status_toast: None,
+    };
+    let _ = draw_bento_dashboard_canvas(&mut canvas_home, &mut zones, -1000.0, -1000.0, &state_home);
+    canvas_home.save_png(&dir.join("ui_dashboard_home.png"))?;
+    canvas_home.save_png(&dir.join("ui_startup_waiting.png"))?;
+
+    // 2. Settings Tab Preview (1024 x 698)
+    let mut canvas_settings = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
+    let state_settings = DashboardViewState {
+        active_tab: NavTab::Settings,
+        settings: &default_settings,
+        headline: "Connect your phone via USB",
+        subtext: "Make sure USB debugging is enabled on your Android device.",
+        is_connecting: false,
+        is_warning: false,
+        is_mirroring: false,
+        device_serial: None,
+        is_recording: false,
+        rec_elapsed_secs: 0,
+        last_saved_recording: None,
+        stream_width: 0,
+        stream_height: 0,
+        fps: 60,
+        recordings: &[],
+        status_toast: None,
+    };
+    let _ = draw_bento_dashboard_canvas(
+        &mut canvas_settings,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        &state_settings,
+    );
+    canvas_settings.save_png(&dir.join("ui_dashboard_settings.png"))?;
+
+    // 3. About & Help Tab Preview (1024 x 698)
+    let mut canvas_about = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
+    let state_about = DashboardViewState {
+        active_tab: NavTab::About,
+        settings: &default_settings,
+        headline: "Connect your phone via USB",
+        subtext: "Make sure USB debugging is enabled on your Android device.",
+        is_connecting: false,
+        is_warning: false,
+        is_mirroring: false,
+        device_serial: None,
+        is_recording: false,
+        rec_elapsed_secs: 0,
+        last_saved_recording: None,
+        stream_width: 0,
+        stream_height: 0,
+        fps: 60,
+        recordings: &[],
+        status_toast: None,
+    };
+    let _ = draw_bento_dashboard_canvas(
+        &mut canvas_about,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        &state_about,
+    );
+    canvas_about.save_png(&dir.join("ui_dashboard_about.png"))?;
+
+    // 4. Compact Portrait Phone Toolbar Preview (387 x 44)
+    let mut canvas_toolbar = UiCanvas::new(387, TOOLBAR_HEIGHT as usize);
+    let _ = draw_live_toolbar_strip_with_Zones(
+        &mut canvas_toolbar,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        0.0,
+        387.0,
+        false,
+        0,
+        false,
+        60,
+        false,
+    );
+    canvas_toolbar.save_png(&dir.join("ui_compact_phone_toolbar.png"))?;
+
+    Ok(())
+}
+
+fn point_in_rect(px: f32, py: f32, r: &SDL_FRect) -> bool {
+    px >= r.x && px <= (r.x + r.w) && py >= r.y && py <= (r.y + r.h)
+}
+
+impl Drop for Sdl3Renderer {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.window.is_null() {
+                if let Some(set_hit_test) = self.api.sdl_set_window_hit_test {
+                    let _ = set_hit_test(self.window, None, ptr::null_mut());
+                }
+            }
+            if !self.hit_test_ctx.is_null() {
+                let _ = Box::from_raw(self.hit_test_ctx);
+                self.hit_test_ctx = ptr::null_mut();
+            }
+            if !self.ui_texture.is_null() {
+                (self.api.sdl_destroy_texture)(self.ui_texture);
+            }
+            if !self.texture.is_null() {
+                (self.api.sdl_destroy_texture)(self.texture);
+            }
+            if !self.renderer.is_null() {
+                (self.api.sdl_destroy_renderer)(self.renderer);
+            }
+            if !self.window.is_null() {
+                (self.api.sdl_destroy_window)(self.window);
+            }
+            (self.api.sdl_quit)();
+        }
+    }
+}
+
+/// Real-time ultra-low-latency SDL3 audio output player for phone system & game sound.
+pub struct Sdl3AudioPlayer {
+    api: Sdl3Api,
+    stream: *mut SDL_AudioStream,
+}
+
+unsafe impl Send for Sdl3AudioPlayer {}
+
+impl Sdl3AudioPlayer {
+    pub fn new() -> Result<Self, String> {
+        let api = Sdl3Api::load()?;
+        unsafe {
+            let spec = SDL_AudioSpec {
+                format: SDL_AUDIO_S16LE,
+                channels: 2,
+                freq: 48000,
+            };
+            let stream =
+                (api.sdl_open_audio_device_stream)(0xFFFF_FFFF, &spec, None, ptr::null_mut());
+            if stream.is_null() {
+                return Err(format!(
+                    "SDL_OpenAudioDeviceStream failed: {}",
+                    Sdl3Renderer::last_error(&api)
+                ));
+            }
+            let _ = (api.sdl_resume_audio_stream_device)(stream);
+            Ok(Self { api, stream })
+        }
+    }
+
+    pub fn play(&mut self, pcm_bytes: &[u8]) {
+        if !self.stream.is_null() && !pcm_bytes.is_empty() {
+            unsafe {
+                (self.api.sdl_put_audio_stream_data)(
+                    self.stream,
+                    pcm_bytes.as_ptr() as *const std::ffi::c_void,
+                    pcm_bytes.len() as std::ffi::c_int,
+                );
+            }
+        }
+    }
+}
+
+impl Drop for Sdl3AudioPlayer {
+    fn drop(&mut self) {
+        if !self.stream.is_null() {
+            unsafe {
+                (self.api.sdl_destroy_audio_stream)(self.stream);
+            }
+            self.stream = ptr::null_mut();
+        }
+    }
+}
+
+pub fn calculate_target_window_size(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (DASHBOARD_WIDTH, DASHBOARD_HEIGHT);
+    }
+    let (video_w, video_h) = if width >= height {
+        let target_h = 700u32;
+        let target_w = (width as u64 * target_h as u64 / height as u64) as u32;
+        if target_w > 1560 {
+            let max_w = 1560u32;
+            let h = (height as u64 * max_w as u64 / width as u64) as u32;
+            (max_w, h.max(100))
+        } else {
+            (target_w.max(100), target_h)
+        }
+    } else {
+        let target_h = 860u32;
+        let target_w = (width as u64 * target_h as u64 / height as u64) as u32;
+        (target_w.max(100), target_h)
+    };
+    (video_w, video_h + TOOLBAR_HEIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_export_ui_snapshots() {
+        let out_dir = Path::new(
+            r"C:\Users\asus\.gemini\antigravity\brain\6c58fc51-de79-473e-8077-19f27f6113b8\scratch",
+        );
+        export_preview_snapshots(out_dir).expect("Failed to export UI preview snapshots");
+    }
+
+    #[test]
+    fn test_compact_phone_window_sizing_and_toolbar_layout() {
+        let (pw, ph) = calculate_target_window_size(1080, 2400);
+        assert_eq!((pw, ph), (387, 904));
+
+        let (lw, lh) = calculate_target_window_size(2400, 1080);
+        assert_eq!((lw, lh), (1555, 744));
+
+        let mut canvas = UiCanvas::new(pw as usize, TOOLBAR_HEIGHT as usize);
+        let mut zones = Vec::new();
+        let first_btn_x = draw_live_toolbar_strip_with_Zones(
+            &mut canvas,
+            &mut zones,
+            -1000.0,
+            -1000.0,
+            0.0,
+            pw as f32,
+            true,
+            12,
+            true,
+            60,
+            false,
+        );
+        assert!(
+            first_btn_x >= 96.0,
+            "Expected generous draggable left area on 387px portrait toolbar, got {}",
+            first_btn_x
+        );
+        assert_eq!(zones.len(), 6);
+        assert!(zones.iter().any(|z| z.action == UiAction::StopSession));
+        assert!(zones
+            .iter()
+            .any(|z| z.action == UiAction::ToggleFullscreenMirror));
+    }
+}
