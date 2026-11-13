@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 5/8
+// [Mobile Mirror] Progressive implementation phase 6/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -2412,3 +2412,486 @@ fn draw_center_live_mirror_view(
         ERROR_BG_HOVER
     } else {
         ERROR_BG
+    };
+    draw_small_pill(canvas, &stop_rect, "Stop", stop_bg, ERROR_RED);
+    hit_zones.push(HitZone {
+        rect: stop_rect,
+        action: UiAction::StopMirroring,
+    });
+
+    // Dark obsidian stage inside Center Card for the live GPU video frame
+    let stage = SDL_FRect {
+        x: card_x + 16.0,
+        y: card_y + bar_h,
+        w: card_w - 32.0,
+        h: card_h - bar_h - 16.0,
+    };
+    canvas.draw_rounded_card(
+        stage.x,
+        stage.y,
+        stage.w,
+        stage.h,
+        14.0,
+        Rgb(12, 16, 26),
+        BORDER_SUBTLE,
+        1.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    stage
+}
+
+/// Renders the functional `Recordings` Manager inside the Center Card.
+#[allow(clippy::too_many_arguments)]
+fn draw_center_recordings_view(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    card_x: f32,
+    card_y: f32,
+    card_w: f32,
+    card_h: f32,
+    state: &DashboardViewState<'_>,
+) {
+    // Header
+    canvas.draw_text(
+        "Saved Recordings",
+        card_x + 28.0,
+        card_y + 24.0,
+        20.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+    let sub = format!(
+        "{} MP4 video file(s) in recordings/ folder (Zero-Copy Lossless H.264 + AAC)",
+        state.recordings.len()
+    );
+    let fitted_sub = canvas.fit_text_to_width(&sub, card_w - 180.0, 12.8, FontWeight::Regular);
+    canvas.draw_text(
+        &fitted_sub,
+        card_x + 28.0,
+        card_y + 54.0,
+        12.8,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+
+    // Top-right "[ Open Folder ]" button
+    let open_rect = SDL_FRect {
+        x: card_x + card_w - 150.0,
+        y: card_y + 24.0,
+        w: 122.0,
+        h: 36.0,
+    };
+    let open_bg = if point_in_rect(mx, my, &open_rect) {
+        APPLE_BLUE_HOVER
+    } else {
+        APPLE_BLUE_SOFT
+    };
+    draw_small_pill(canvas, &open_rect, "Open Folder", open_bg, APPLE_BLUE);
+    hit_zones.push(HitZone {
+        rect: open_rect,
+        action: UiAction::OpenRecordingsFolder,
+    });
+
+    canvas.fill_rect(
+        (card_x + 24.0) as i32,
+        (card_y + 86.0) as i32,
+        (card_w - 48.0) as i32,
+        1,
+        BORDER_SUBTLE,
+    );
+
+    if state.recordings.is_empty() {
+        let cx = card_x + card_w * 0.5;
+        let cy = card_y + card_h * 0.5;
+        canvas.draw_circle(cx, cy - 34.0, 32.0, PILL_NEUTRAL, 1.0);
+        canvas.draw_video_cam_icon(cx, cy - 34.0, APPLE_BLUE, 1.0);
+        canvas.draw_text_centered(
+            "No recordings saved yet",
+            cx,
+            cy + 12.0,
+            16.5,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+        let empty_hint = canvas.fit_text_to_width(
+            "Click 'Start Recording' on the right panel while mirroring to record lossless MP4 video.",
+            card_w - 48.0,
+            13.2,
+            FontWeight::Regular,
+        );
+        canvas.draw_text_centered(
+            &empty_hint,
+            cx,
+            cy + 42.0,
+            13.2,
+            FontWeight::Regular,
+            TEXT_SECONDARY,
+            1.0,
+        );
+        return;
+    }
+
+    let max_rows = ((card_h - 110.0) / 68.0).floor().max(1.0) as usize;
+    for (idx, entry) in state.recordings.iter().take(max_rows).enumerate() {
+        let ry = card_y + 100.0 + idx as f32 * 68.0;
+        let rx = card_x + 24.0;
+        let rw = card_w - 54.0;
+        let rh = 58.0;
+
+        canvas.draw_rounded_card(
+            rx,
+            ry,
+            rw,
+            rh,
+            14.0,
+            PILL_NEUTRAL,
+            BORDER_SUBTLE,
+            0.8,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        let r_cy = ry + rh * 0.5;
+        canvas.draw_circle(rx + 26.0, r_cy, 16.0, APPLE_BLUE_SOFT, 1.0);
+        canvas.draw_play_icon(rx + 26.0, r_cy, 8.5, APPLE_BLUE, 1.0);
+
+        let name_fit =
+            canvas.fit_text_to_width(&entry.file_name, rw - 270.0, 13.8, FontWeight::Semibold);
+        canvas.draw_text(
+            &name_fit,
+            rx + 52.0,
+            ry + 10.0,
+            13.8,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+        let meta_txt = format!("{}  •  MP4 (H.264 + AAC)", entry.formatted_size());
+        canvas.draw_text(
+            &meta_txt,
+            rx + 52.0,
+            ry + 32.0,
+            12.2,
+            FontWeight::Regular,
+            TEXT_SECONDARY,
+            1.0,
+        );
+
+        // Action buttons: [Play] [Show] [Delete]
+        let del_rect = SDL_FRect {
+            x: rx + rw - 76.0,
+            y: ry + 13.0,
+            w: 64.0,
+            h: 32.0,
+        };
+        let show_rect = SDL_FRect {
+            x: del_rect.x - 70.0,
+            y: ry + 13.0,
+            w: 62.0,
+            h: 32.0,
+        };
+        let play_rect = SDL_FRect {
+            x: show_rect.x - 70.0,
+            y: ry + 13.0,
+            w: 62.0,
+            h: 32.0,
+        };
+
+        let play_bg = if point_in_rect(mx, my, &play_rect) {
+            BLUE_GRAD_HOVER_TOP
+        } else {
+            APPLE_BLUE
+        };
+        draw_small_pill(canvas, &play_rect, "Play", play_bg, CARD_WHITE);
+        hit_zones.push(HitZone {
+            rect: play_rect,
+            action: UiAction::PlayRecording(entry.full_path.clone()),
+        });
+
+        let show_bg = if point_in_rect(mx, my, &show_rect) {
+            CARD_BORDER
+        } else {
+            CARD_WHITE
+        };
+        draw_small_pill(canvas, &show_rect, "Show", show_bg, TEXT_BODY);
+        hit_zones.push(HitZone {
+            rect: show_rect,
+            action: UiAction::RevealRecording(entry.full_path.clone()),
+        });
+
+        let del_bg = if point_in_rect(mx, my, &del_rect) {
+            ERROR_BG_HOVER
+        } else {
+            ERROR_BG
+        };
+        draw_small_pill(canvas, &del_rect, "Delete", del_bg, ERROR_RED);
+        hit_zones.push(HitZone {
+            rect: del_rect,
+            action: UiAction::DeleteRecording(entry.full_path.clone()),
+        });
+    }
+}
+
+/// Renders the interactive `Settings` panel inside the Center Card where all settings are functional.
+#[allow(clippy::too_many_arguments)]
+fn draw_center_settings_view(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    card_x: f32,
+    card_y: f32,
+    card_w: f32,
+    _card_h: f32,
+    state: &DashboardViewState<'_>,
+) {
+    canvas.draw_text(
+        "Settings",
+        card_x + 28.0,
+        card_y + 22.0,
+        20.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+    let sub_fit = canvas.fit_text_to_width(
+        "All settings apply immediately and persist automatically across sessions",
+        card_w - 180.0,
+        12.8,
+        FontWeight::Regular,
+    );
+    canvas.draw_text(
+        &sub_fit,
+        card_x + 28.0,
+        card_y + 50.0,
+        12.8,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+
+    let reset_rect = SDL_FRect {
+        x: card_x + card_w - 152.0,
+        y: card_y + 22.0,
+        w: 126.0,
+        h: 34.0,
+    };
+    let reset_bg = if point_in_rect(mx, my, &reset_rect) {
+        PILL_NEUTRAL_HOVER
+    } else {
+        PILL_NEUTRAL
+    };
+    draw_small_pill(canvas, &reset_rect, "Reset Defaults", reset_bg, TEXT_BODY);
+    hit_zones.push(HitZone {
+        rect: reset_rect,
+        action: UiAction::ResetDefaultSettings,
+    });
+
+    let s = state.settings;
+    let fps_val = format!("{} FPS", s.target_fps);
+    let br_val = format!("{} Mbps ({})", s.bitrate_mbps, if s.cbr_mode { "CBR" } else { "VBR" });
+    let cbr_val = if s.cbr_mode { "Constant (CBR)" } else { "Variable (VBR)" };
+
+    #[allow(clippy::type_complexity)]
+    let rows: [(&str, &str, Option<bool>, String, UiAction); 9] = [
+        (
+            "Target Frame Rate",
+            "Hardware encoder capture frame rate (30 / 60 / 90 / 120 FPS)",
+            None,
+            fps_val,
+            UiAction::CycleFps,
+        ),
+        (
+            "Video Encoder Bitrate",
+            "H.264 stream bitrate over USB (12 / 16 / 24 / 36 / 48 Mbps)",
+            None,
+            br_val,
+            UiAction::CycleBitrate,
+        ),
+        (
+            "Bitrate Control Mode",
+            "Constant Bitrate (CBR) for lowest latency vs Variable (VBR)",
+            None,
+            cbr_val.to_string(),
+            UiAction::ToggleCbr,
+        ),
+        (
+            "Phone Microphone (Voice Isolation DSP)",
+            "Capture voice-isolated phone mic audio alongside game sound",
+            Some(s.mic_enabled),
+            String::new(),
+            UiAction::ToggleMic,
+        ),
+        (
+            "PC Speaker Audio Playback",
+            "Play phone & game audio live through your laptop speakers",
+            Some(s.pc_audio_enabled),
+            String::new(),
+            UiAction::TogglePcAudio,
+        ),
+        (
+            "Auto-Connect on USB Plug",
+            "Automatically start mirroring when an Android phone is connected",
+            Some(s.auto_connect_usb),
+            String::new(),
+            UiAction::ToggleAutoConnect,
+        ),
+        (
+            "Auto-Record on Mirror Start",
+            "Automatically start lossless MP4 recording when mirroring begins",
+            Some(s.auto_record),
+            String::new(),
+            UiAction::ToggleAutoRecord,
+        ),
+        (
+            "Always on Top Window",
+            "Keep Mobile Mirror window pinned above other desktop apps",
+            Some(s.always_on_top),
+            String::new(),
+            UiAction::ToggleAlwaysOnTop,
+        ),
+        (
+            "Hardware Video Decoder",
+            "GPU decoding acceleration backend (NVDEC / D3D11VA / DXVA2)",
+            None,
+            s.hw_backend.label().to_string(),
+            UiAction::CycleHwBackend,
+        ),
+    ];
+
+    let start_y = card_y + 84.0;
+    let row_h = 53.0;
+    let gap = 7.0;
+    let rx = card_x + 24.0;
+    let rw = card_w - 54.0;
+
+    for (idx, (title, desc, toggle_state, badge_text, action)) in rows.into_iter().enumerate() {
+        let ry = start_y + idx as f32 * (row_h + gap);
+        let row_rect = SDL_FRect {
+            x: rx,
+            y: ry,
+            w: rw,
+            h: row_h,
+        };
+        let is_hov = point_in_rect(mx, my, &row_rect);
+        let bg = if is_hov {
+            PILL_NEUTRAL_HOVER
+        } else {
+            PILL_NEUTRAL
+        };
+        canvas.draw_rounded_card(
+            rx,
+            ry,
+            rw,
+            row_h,
+            12.0,
+            bg,
+            bg,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        let right_reserve = if toggle_state.is_some() { 76.0 } else { 156.0 };
+        let fit_title =
+            canvas.fit_text_to_width(title, rw - right_reserve, 13.8, FontWeight::Semibold);
+        canvas.draw_text(
+            &fit_title,
+            rx + 16.0,
+            ry + 7.0,
+            13.8,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+        let fit_desc =
+            canvas.fit_text_to_width(desc, rw - right_reserve, 12.0, FontWeight::Regular);
+        canvas.draw_text(
+            &fit_desc,
+            rx + 16.0,
+            ry + 29.0,
+            12.0,
+            FontWeight::Regular,
+            TEXT_SECONDARY,
+            1.0,
+        );
+
+        if let Some(is_on) = toggle_state {
+            canvas.draw_toggle_switch(
+                rx + rw - 60.0,
+                ry + (row_h - 24.0) * 0.5,
+                44.0,
+                24.0,
+                is_on,
+                if is_hov { 1.0 } else { 0.0 },
+            );
+        } else {
+            let bw = (canvas.measure_text_width(&badge_text, 12.2, FontWeight::Semibold) + 24.0)
+                .max(96.0);
+            let pill_r = SDL_FRect {
+                x: rx + rw - bw - 14.0,
+                y: ry + (row_h - 30.0) * 0.5,
+                w: bw,
+                h: 30.0,
+            };
+            draw_small_pill(canvas, &pill_r, &badge_text, APPLE_BLUE_SOFT, APPLE_BLUE);
+        }
+
+        hit_zones.push(HitZone {
+            rect: row_rect,
+            action,
+        });
+    }
+}
+
+/// Renders the `About` / `Help & Support` / `How to Enable USB Debugging` view inside the Center Card.
+#[allow(clippy::too_many_arguments)]
+fn draw_center_about_help_view(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    card_x: f32,
+    card_y: f32,
+    card_w: f32,
+    card_h: f32,
+    state: &DashboardViewState<'_>,
+) {
+    canvas.draw_text(
+        "Help, USB Debugging Guide & About",
+        card_x + 28.0,
+        card_y + 24.0,
+        20.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+    let sub_fit = canvas.fit_text_to_width(
+        "Follow these steps to enable USB Debugging and mirror your Android screen at 60 FPS",
+        card_w - 56.0,
+        12.8,
+        FontWeight::Regular,
+    );
+    canvas.draw_text(
+        &sub_fit,
+        card_x + 28.0,
+        card_y + 52.0,
+        12.8,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
