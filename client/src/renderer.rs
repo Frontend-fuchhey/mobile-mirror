@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 3/8
+// [Mobile Mirror] Progressive implementation phase 4/8
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
@@ -1447,3 +1447,486 @@ fn draw_bento_dashboard_canvas(
         let icon_cx = 38.0;
         let icon_cy = ny + nh * 0.5;
         let fg = if is_active { APPLE_BLUE } else { TEXT_BODY };
+        let weight = if is_active {
+            FontWeight::Semibold
+        } else {
+            FontWeight::Regular
+        };
+
+        let inner_bg = if is_active {
+            APPLE_BLUE_SOFT
+        } else if is_hover {
+            PILL_NEUTRAL_HOVER
+        } else {
+            BG_SIDEBAR
+        };
+
+        match tab {
+            NavTab::Home => canvas.draw_home_icon(icon_cx, icon_cy, inner_bg, fg, 1.0),
+            NavTab::Recordings => canvas.draw_video_cam_icon(icon_cx, icon_cy, fg, 1.0),
+            NavTab::Settings => {
+                canvas.draw_gear_icon(icon_cx, icon_cy, 8.6, inner_bg, fg, 1.0);
+            }
+            NavTab::About => canvas.draw_info_circle_icon(icon_cx, icon_cy, fg, 1.0),
+        }
+
+        let cap = canvas.cap_height(14.5, weight);
+        canvas.draw_text_baseline(
+            label,
+            64.0,
+            icon_cy + cap * 0.5,
+            14.5,
+            weight,
+            fg,
+            1.0,
+        );
+
+        hit_zones.push(HitZone {
+            rect: nav_rect,
+            action: UiAction::SwitchTab(tab),
+        });
+    }
+
+    // 5. Bottom-Left Status Card ("Ready" / "Waiting for device...")
+    let status_card_w = sidebar_w - 24.0;
+    let status_card_h = 76.0;
+    let status_card_y = (win_h - status_card_h - 20.0).max(320.0);
+    canvas.draw_rounded_card(
+        12.0,
+        status_card_y,
+        status_card_w,
+        status_card_h,
+        14.0,
+        CARD_WHITE,
+        CARD_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.04,
+        12.0,
+        3.0,
+        1.0,
+    );
+
+    let (dot_col, status_title, status_sub) = if state.is_mirroring {
+        let res = format!("{}×{} • {}fps", state.stream_width, state.stream_height, state.fps);
+        (LIVE_GREEN, "Live", res)
+    } else if state.is_connecting {
+        (APPLE_BLUE, "Connecting", "Starting USB stream...".to_string())
+    } else if state.is_warning {
+        (WARNING_AMBER, "Action Needed", "Check phone screen".to_string())
+    } else if let Some(serial) = state.device_serial {
+        (LIVE_GREEN, "Ready", format!("USB: {}", serial))
+    } else {
+        (LIVE_GREEN, "Ready", "Waiting for device...".to_string())
+    };
+
+    let dot_cx = 30.0;
+    let dot_cy = status_card_y + 27.0;
+    canvas.draw_circle(dot_cx, dot_cy, 5.2, dot_col, 1.0);
+    let st_cap = canvas.cap_height(14.2, FontWeight::Bold);
+    canvas.draw_text_baseline(
+        status_title,
+        43.0,
+        dot_cy + st_cap * 0.5,
+        14.2,
+        FontWeight::Bold,
+        dot_col,
+        1.0,
+    );
+
+    let fitted_sub = canvas.fit_text_to_width(
+        &status_sub,
+        status_card_w - 22.0,
+        12.2,
+        FontWeight::Regular,
+    );
+    canvas.draw_text(
+        &fitted_sub,
+        22.0,
+        status_card_y + 48.0,
+        12.2,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+
+    // 6. Right Column — 3 Stacked Functional Cards (Recording, Mirror Quality, Quick Tools)
+    let right_col_w = 276.0;
+    let right_col_x = (win_w - right_col_w - 22.0).max(540.0);
+    draw_right_column_cards(canvas, hit_zones, mx, my, right_col_x, right_col_w, state);
+
+    // 7. Center Main Card (x = sidebar_w + 18 .. right_col_x - 18, y = 72 .. win_h - 22)
+    let center_x = sidebar_w + 18.0;
+    let center_y = 72.0;
+    let center_w = (right_col_x - 18.0 - center_x).max(340.0);
+    let center_h = (win_h - 22.0 - center_y).max(380.0);
+
+    canvas.draw_rounded_card(
+        center_x,
+        center_y,
+        center_w,
+        center_h,
+        22.0,
+        CARD_WHITE,
+        CARD_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.055,
+        20.0,
+        6.0,
+        1.0,
+    );
+
+    let video_stage = match state.active_tab {
+        NavTab::Home => {
+            if state.is_mirroring {
+                Some(draw_center_live_mirror_view(
+                    canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+                ))
+            } else {
+                draw_center_home_hero_view(
+                    canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+                );
+                None
+            }
+        }
+        NavTab::Recordings => {
+            draw_center_recordings_view(
+                canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+            );
+            None
+        }
+        NavTab::Settings => {
+            draw_center_settings_view(
+                canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+            );
+            None
+        }
+        NavTab::About => {
+            draw_center_about_help_view(
+                canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+            );
+            None
+        }
+    };
+
+    // Optional feedback toast pill at top-center of Center Card
+    if let Some(toast) = state.status_toast {
+        if !toast.is_empty() {
+            let tw = canvas.measure_text_width(toast, 13.0, FontWeight::Semibold);
+            let pill_w = (tw + 34.0).min(center_w - 32.0);
+            let pill_x = center_x + (center_w - pill_w) * 0.5;
+            let pill_y = center_y + 14.0;
+            canvas.draw_rounded_card(
+                pill_x,
+                pill_y,
+                pill_w,
+                32.0,
+                16.0,
+                Rgb(19, 27, 46),
+                APPLE_BLUE,
+                1.0,
+                SHADOW_SLATE,
+                0.18,
+                10.0,
+                3.0,
+                0.96,
+            );
+            let fitted = canvas.fit_text_to_width(toast, pill_w - 22.0, 13.0, FontWeight::Semibold);
+            let cap = canvas.cap_height(13.0, FontWeight::Semibold);
+            let ftw = canvas.measure_text_width(&fitted, 13.0, FontWeight::Semibold);
+            canvas.draw_text_baseline(
+                &fitted,
+                pill_x + (pill_w - ftw) * 0.5,
+                pill_y + (32.0 + cap) * 0.5,
+                13.0,
+                FontWeight::Semibold,
+                CARD_WHITE,
+                1.0,
+            );
+        }
+    }
+
+    video_stage
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_right_column_cards(
+    canvas: &mut UiCanvas,
+    hit_zones: &mut Vec<HitZone>,
+    mx: f32,
+    my: f32,
+    col_x: f32,
+    col_w: f32,
+    state: &DashboardViewState<'_>,
+) {
+    let col_cx = col_x + col_w * 0.5;
+
+    // ========================================================================
+    // Card 1: Recording Card (y = 72, h = 236)
+    // ========================================================================
+    let rec_y = 72.0;
+    let rec_h = 236.0;
+    canvas.draw_rounded_card(
+        col_x,
+        rec_y,
+        col_w,
+        rec_h,
+        20.0,
+        CARD_WHITE,
+        CARD_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.05,
+        18.0,
+        5.0,
+        1.0,
+    );
+
+    // Header: Red dot + "Recording" + Right status badge ("Off" / "ON" / "Auto")
+    let rec_hdr_cy = rec_y + 34.0;
+    canvas.draw_circle(col_x + 28.0, rec_hdr_cy, 7.5, ERROR_BG, 1.0);
+    canvas.draw_circle(col_x + 28.0, rec_hdr_cy, 4.8, ERROR_RED, 1.0);
+
+    let hdr_cap = canvas.cap_height(16.0, FontWeight::Bold);
+    canvas.draw_text_baseline(
+        "Recording",
+        col_x + 44.0,
+        rec_hdr_cy + hdr_cap * 0.5,
+        16.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    let (badge_label, badge_bg, badge_fg) = if state.is_recording {
+        ("ON", ERROR_BG, ERROR_RED)
+    } else if state.settings.auto_record {
+        ("Auto", WARNING_AMBER_SOFT, WARNING_AMBER)
+    } else {
+        ("Off", BADGE_OFF_BG, TEXT_BODY)
+    };
+    let badge_w = 50.0;
+    let badge_h = 28.0;
+    let badge_x = col_x + col_w - badge_w - 18.0;
+    let badge_y = rec_hdr_cy - badge_h * 0.5;
+    canvas.draw_rounded_card(
+        badge_x,
+        badge_y,
+        badge_w,
+        badge_h,
+        14.0,
+        badge_bg,
+        badge_bg,
+        0.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    let bw_txt = canvas.measure_text_width(badge_label, 12.2, FontWeight::Semibold);
+    let b_cap = canvas.cap_height(12.2, FontWeight::Semibold);
+    canvas.draw_text_baseline(
+        badge_label,
+        badge_x + (badge_w - bw_txt) * 0.5,
+        badge_y + (badge_h + b_cap) * 0.5,
+        12.2,
+        FontWeight::Semibold,
+        badge_fg,
+        1.0,
+    );
+
+    // Large Tabular Timer: "00:00:00"
+    let timer_str = format_hh_mm_ss(if state.is_recording {
+        state.rec_elapsed_secs
+    } else {
+        0
+    });
+    canvas.draw_text_centered(
+        &timer_str,
+        col_cx,
+        rec_y + 68.0,
+        29.0,
+        FontWeight::Bold,
+        if state.is_recording {
+            ERROR_RED
+        } else {
+            TEXT_PRIMARY
+        },
+        1.0,
+    );
+
+    // Status subtext below timer
+    let rec_subtext = if state.is_recording {
+        "Recording MP4 in progress..."
+    } else if let Some(saved) = state.last_saved_recording {
+        saved
+    } else if state.settings.auto_record {
+        "Auto-record armed for mirror"
+    } else {
+        "No recording in progress"
+    };
+    let fitted_rec_sub =
+        canvas.fit_text_to_width(rec_subtext, col_w - 28.0, 12.8, FontWeight::Regular);
+    canvas.draw_text_centered(
+        &fitted_rec_sub,
+        col_cx,
+        rec_y + 118.0,
+        12.8,
+        FontWeight::Regular,
+        TEXT_SECONDARY,
+        1.0,
+    );
+
+    // Action Button: "[ ● Start Recording ]"
+    let rec_btn_rect = SDL_FRect {
+        x: col_x + 18.0,
+        y: rec_y + 160.0,
+        w: col_w - 36.0,
+        h: 50.0,
+    };
+    let rec_btn_hover = point_in_rect(mx, my, &rec_btn_rect);
+    let rec_btn_fill = if rec_btn_hover {
+        ERROR_BG_HOVER
+    } else {
+        ERROR_BG
+    };
+    canvas.draw_rounded_card(
+        rec_btn_rect.x,
+        rec_btn_rect.y,
+        rec_btn_rect.w,
+        rec_btn_rect.h,
+        25.0,
+        rec_btn_fill,
+        Rgb(248, 212, 218),
+        0.8,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    let rec_btn_label = if state.is_recording {
+        "Stop Recording"
+    } else if !state.is_mirroring && state.settings.auto_record {
+        "Auto-Record: On"
+    } else {
+        "Start Recording"
+    };
+    let rbl_w = canvas.measure_text_width(rec_btn_label, 14.0, FontWeight::Semibold);
+    let rbl_cap = canvas.cap_height(14.0, FontWeight::Semibold);
+    let rbl_total_w = 18.0 + rbl_w;
+    let rbl_start_x = rec_btn_rect.x + (rec_btn_rect.w - rbl_total_w) * 0.5;
+    let rbl_cy = rec_btn_rect.y + rec_btn_rect.h * 0.5;
+
+    canvas.draw_circle(rbl_start_x + 5.0, rbl_cy, 7.2, Rgb(250, 198, 205), 1.0);
+    canvas.draw_circle(rbl_start_x + 5.0, rbl_cy, 4.6, ERROR_RED, 1.0);
+    canvas.draw_text_baseline(
+        rec_btn_label,
+        rbl_start_x + 18.0,
+        rbl_cy + rbl_cap * 0.5,
+        14.0,
+        FontWeight::Semibold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    hit_zones.push(HitZone {
+        rect: rec_btn_rect,
+        action: UiAction::ToggleRecord,
+    });
+
+    // ========================================================================
+    // Card 2: Mirror Quality Card (y = 324, h = 150)
+    // ========================================================================
+    let qual_y = 324.0;
+    let qual_h = 150.0;
+    canvas.draw_rounded_card(
+        col_x,
+        qual_y,
+        col_w,
+        qual_h,
+        20.0,
+        CARD_WHITE,
+        CARD_BORDER,
+        1.0,
+        SHADOW_SLATE,
+        0.05,
+        18.0,
+        5.0,
+        1.0,
+    );
+
+    let qual_hdr_cy = qual_y + 30.0;
+    canvas.draw_gear_icon(col_x + 28.0, qual_hdr_cy, 8.2, CARD_WHITE, TEXT_BODY, 1.0);
+    canvas.draw_text_baseline(
+        "Mirror Quality",
+        col_x + 44.0,
+        qual_hdr_cy + hdr_cap * 0.5,
+        16.0,
+        FontWeight::Bold,
+        TEXT_PRIMARY,
+        1.0,
+    );
+
+    // 3-Way Segmented Control: [ Auto | HD | FHD ]
+    let seg_x = col_x + 18.0;
+    let seg_y = qual_y + 54.0;
+    let seg_w = col_w - 36.0;
+    let seg_h = 42.0;
+    canvas.draw_rounded_card(
+        seg_x,
+        seg_y,
+        seg_w,
+        seg_h,
+        21.0,
+        PILL_NEUTRAL,
+        BORDER_SUBTLE,
+        0.8,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    let item_w = seg_w / 3.0;
+    let qualities = [MirrorQuality::Auto, MirrorQuality::Hd, MirrorQuality::Fhd];
+    for (idx, q) in qualities.iter().copied().enumerate() {
+        let q_rect = SDL_FRect {
+            x: seg_x + idx as f32 * item_w,
+            y: seg_y,
+            w: item_w,
+            h: seg_h,
+        };
+        let is_sel = state.settings.quality == q;
+        let is_hov = point_in_rect(mx, my, &q_rect);
+
+        if is_sel {
+            canvas.draw_gradient_rounded_card(
+                q_rect.x,
+                q_rect.y,
+                q_rect.w,
+                q_rect.h,
+                21.0,
+                BLUE_GRAD_TOP,
+                APPLE_BLUE,
+                APPLE_BLUE,
+                0.0,
+                APPLE_BLUE,
+                0.18,
+                8.0,
+                2.0,
+                1.0,
+            );
+        } else if is_hov {
+            canvas.draw_rounded_card(
+                q_rect.x + 2.0,
+                q_rect.y + 2.0,
+                q_rect.w - 4.0,
+                q_rect.h - 4.0,
+                19.0,
+                PILL_NEUTRAL_HOVER,
+                PILL_NEUTRAL_HOVER,
