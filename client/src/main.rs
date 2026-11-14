@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 2/6
+// [Mobile Mirror] Progressive implementation phase 3/6
 pub mod adb;
 pub mod decoder;
 pub mod ffi;
@@ -414,3 +414,211 @@ fn run_startup_ui(
                     renderer.show_toast(format!(
                         "Mirror Quality set to {} ({} Mbps @ {} FPS)",
                         q.label(),
+                        settings.bitrate_mbps,
+                        settings.target_fps
+                    ));
+                }
+                UiAction::SwitchTab(tab) => {
+                    renderer.active_tab = tab;
+                    if tab == NavTab::Recordings || tab == NavTab::About {
+                        renderer.refresh_recordings_if_needed(&config.record_dir, true);
+                    }
+                }
+                UiAction::OpenRecordingsFolder => {
+                    open_folder_in_explorer(&config.record_dir);
+                    renderer.active_tab = NavTab::Recordings;
+                    renderer.refresh_recordings_if_needed(&config.record_dir, true);
+                    renderer.show_toast("Opened recordings/ folder");
+                }
+                UiAction::PlayRecording(path) => {
+                    open_media_file(&path);
+                    renderer.show_toast("Opening recording in media player...");
+                }
+                UiAction::RevealRecording(path) => {
+                    reveal_file_in_explorer(&path);
+                }
+                UiAction::DeleteRecording(path) => {
+                    if std::fs::remove_file(&path).is_ok() {
+                        renderer.refresh_recordings_if_needed(&config.record_dir, true);
+                        renderer.show_toast("Deleted recording");
+                    }
+                }
+                UiAction::CycleFps => {
+                    settings.cycle_fps();
+                    settings.save(&config.record_dir);
+                    connector.set_quality(settings.to_stream_quality());
+                    renderer.show_toast(format!("Target frame rate set to {} FPS", settings.target_fps));
+                }
+                UiAction::CycleBitrate => {
+                    settings.cycle_bitrate();
+                    settings.save(&config.record_dir);
+                    connector.set_quality(settings.to_stream_quality());
+                    renderer.show_toast(format!(
+                        "Video encoder bitrate set to {} Mbps",
+                        settings.bitrate_mbps
+                    ));
+                }
+                UiAction::ToggleCbr => {
+                    settings.cbr_mode = !settings.cbr_mode;
+                    settings.save(&config.record_dir);
+                    connector.set_quality(settings.to_stream_quality());
+                    renderer.show_toast(if settings.cbr_mode {
+                        "Bitrate mode: Constant (CBR)"
+                    } else {
+                        "Bitrate mode: Variable (VBR)"
+                    });
+                }
+                UiAction::TogglePcAudio => {
+                    settings.pc_audio_enabled = !settings.pc_audio_enabled;
+                    settings.save(&config.record_dir);
+                    renderer.show_toast(if settings.pc_audio_enabled {
+                        "PC Speaker Audio Playback: ON"
+                    } else {
+                        "PC Speaker Audio Playback: OFF"
+                    });
+                }
+                UiAction::ToggleAutoConnect => {
+                    settings.auto_connect_usb = !settings.auto_connect_usb;
+                    settings.save(&config.record_dir);
+                    connector.set_auto_connect(settings.auto_connect_usb);
+                    renderer.show_toast(if settings.auto_connect_usb {
+                        "Auto-Connect on USB Plug: ON"
+                    } else {
+                        "Auto-Connect on USB Plug: OFF"
+                    });
+                }
+                UiAction::ToggleAutoRecord => {
+                    settings.auto_record = !settings.auto_record;
+                    settings.save(&config.record_dir);
+                    renderer.show_toast(if settings.auto_record {
+                        "Auto-Record on Mirror Start: ON"
+                    } else {
+                        "Auto-Record on Mirror Start: OFF"
+                    });
+                }
+                UiAction::ToggleAlwaysOnTop => {
+                    settings.always_on_top = !settings.always_on_top;
+                    settings.save(&config.record_dir);
+                    renderer.set_always_on_top(settings.always_on_top);
+                    renderer.show_toast(if settings.always_on_top {
+                        "Window pinned Always on Top"
+                    } else {
+                        "Always on Top disabled"
+                    });
+                }
+                UiAction::CycleHwBackend => {
+                    settings.hw_backend = settings.hw_backend.next();
+                    settings.save(&config.record_dir);
+                    renderer.show_toast(format!(
+                        "Hardware decoder set to {}",
+                        settings.hw_backend.label()
+                    ));
+                }
+                UiAction::ToggleFullscreenMirror => {
+                    settings.fullscreen_mirror = !settings.fullscreen_mirror;
+                    settings.save(&config.record_dir);
+                }
+                UiAction::ToggleWindowFullscreen => {
+                    renderer.toggle_window_fullscreen();
+                }
+                UiAction::ResetDefaultSettings => {
+                    *settings = AppSettings::default();
+                    settings.save(&config.record_dir);
+                    renderer.set_always_on_top(false);
+                    connector.set_quality(settings.to_stream_quality());
+                    connector.set_auto_connect(true);
+                    renderer.show_toast("Settings reset to defaults");
+                }
+            }
+        }
+
+        if let Some(UsbStatus::Connected(reader, adb_guard)) = connector.poll_status() {
+            renderer.active_tab = NavTab::Home;
+            settings.fullscreen_mirror = true;
+            return Some((reader, adb_guard));
+        }
+
+        renderer.refresh_recordings_if_needed(&config.record_dir, false);
+        let toast_msg = renderer.active_toast().map(|s| s.to_string());
+        let recs_snapshot = if renderer.active_tab == NavTab::Recordings {
+            renderer.cached_recordings.clone()
+        } else {
+            Vec::new()
+        };
+
+        let view_state = DashboardViewState {
+            active_tab: renderer.active_tab,
+            settings,
+            headline: connector.headline(),
+            subtext: connector.subtext(),
+            is_connecting: connector.is_connecting(),
+            is_warning: connector.is_warning(),
+            is_mirroring: false,
+            device_serial: connector.device_serial(),
+            is_recording: false,
+            rec_elapsed_secs: 0,
+            last_saved_recording: last_saved_recording.as_deref(),
+            stream_width: 0,
+            stream_height: 0,
+            fps: settings.target_fps,
+            recordings: &recs_snapshot,
+            status_toast: toast_msg.as_deref(),
+        };
+        renderer.render_dashboard(&view_state);
+
+        thread::sleep(Duration::from_millis(16));
+    }
+}
+
+fn run_streaming_session(
+    mut reader: StreamReader<TcpStream>,
+    existing_renderer: Option<&mut Sdl3Renderer>,
+    config: &ClientConfig,
+    settings: &mut AppSettings,
+    last_saved_recording: &mut Option<String>,
+) -> SessionOutcome {
+    let header = reader.header();
+    let control_writer = reader.take_control_writer();
+    println!(
+        "[Mobile Mirror] Live USB stream active: {}x{} (codec=0x{:08x})",
+        header.width, header.height, header.codec_id
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Path A & B zero-copy NAL splitter
+    let (mut splitter, _unused_mux_rx, decoder_rx, metrics) =
+        NalSplitter::new(false, config.enable_display);
+
+    // Spawn dedicated network ingestion thread
+    let running_net = Arc::clone(&running);
+    let max_packets = config.max_packets;
+    let net_handle = thread::Builder::new()
+        .name("nal-ingest".to_string())
+        .spawn(move || {
+            let mut count = 0u64;
+            while running_net.load(Ordering::Relaxed) {
+                match reader.next_packet() {
+                    Ok(Some(packet)) => {
+                        splitter.dispatch(packet);
+                        count += 1;
+                        if let Some(limit) = max_packets {
+                            if count >= limit {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        println!("[Mobile Mirror] Android USB stream closed.");
+                        break;
+                    }
+                    Err(e) => {
+                        if running_net.load(Ordering::Relaxed) {
+                            eprintln!("[Mobile Mirror] USB stream read ended: {}", e);
+                        }
+                        break;
+                    }
+                }
+            }
+            running_net.store(false, Ordering::SeqCst);
+        })
