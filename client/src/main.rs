@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 1/6
+// [Mobile Mirror] Progressive implementation phase 2/6
 pub mod adb;
 pub mod decoder;
 pub mod ffi;
@@ -206,3 +206,211 @@ fn print_usage() {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionOutcome {
+    /// User explicitly closed the window or pressed `Q` / `Esc`.
+    UserQuit,
+    /// User clicked `[Stop]` to disconnect mirroring and return to the Home Hero view.
+    UserStoppedStream,
+    /// User changed `Mirror Quality` (`Auto` / `HD` / `FHD`) or encoder bitrate/FPS while live;
+    /// immediately reconnects with the updated encoder configuration.
+    RestartForQualityChange,
+    /// Stream ended (`EOF` or USB cable unplugged) while window remained open.
+    Disconnected,
+}
+
+fn main() {
+    let config = ClientConfig::parse_args();
+    let mut settings = AppSettings::load(&config.record_dir);
+    if config.auto_record {
+        settings.auto_record = true;
+    }
+    if config.enable_mic {
+        settings.mic_enabled = true;
+    }
+    if config.laptop_audio {
+        settings.pc_audio_enabled = true;
+    }
+    if let Some(ref hw) = config.preferred_hw {
+        settings.hw_backend = HwBackendPref::from_opt_str(Some(hw));
+    }
+
+    // Headless or explicit direct-connect mode
+    if !config.enable_display || config.startup_mode == StartupMode::DirectConnect {
+        println!(
+            "[Mobile Mirror] Connecting directly to Android stream at {}...",
+            config.addr
+        );
+        let reader = match StreamReader::connect(&config.addr) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "[Mobile Mirror] Failed to connect to {}: {}\n\
+                     Hint: Launch without `--addr` to start Mobile Mirror with automatic USB connection.",
+                    config.addr, e
+                );
+                std::process::exit(1);
+            }
+        };
+        let mut last_saved = None;
+        let _ = run_streaming_session(
+            reader,
+            None,
+            &config,
+            &mut settings,
+            &mut last_saved,
+        );
+        return;
+    }
+
+    // Create the SDL3 application window ("Mobile Mirror") at 1024x698 Bento Dashboard geometry
+    let mut renderer = match Sdl3Renderer::new("Mobile Mirror", DASHBOARD_WIDTH, DASHBOARD_HEIGHT) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "[Mobile Mirror ERROR] Failed to create SDL3 window: {}\n\
+                 Ensure SDL3.dll is present in client/lib/.",
+                e
+            );
+            std::process::exit(1);
+        }
+    };
+    renderer.set_always_on_top(settings.always_on_top);
+    renderer.refresh_recordings_if_needed(&config.record_dir, true);
+
+    let mut last_saved_recording: Option<String> = None;
+    let mut force_immediate_connect = false;
+
+    loop {
+        let (reader, _adb_guard) = match run_startup_ui(
+            &mut renderer,
+            &config,
+            &mut settings,
+            &mut last_saved_recording,
+            force_immediate_connect,
+        ) {
+            Some(pair) => pair,
+            None => {
+                println!("[Mobile Mirror] Closed.");
+                return;
+            }
+        };
+        force_immediate_connect = false;
+
+        let outcome = run_streaming_session(
+            reader,
+            Some(&mut renderer),
+            &config,
+            &mut settings,
+            &mut last_saved_recording,
+        );
+        // Dropping `_adb_guard` deterministically cleans up `adb forward` and `app_process`.
+        drop(_adb_guard);
+
+        if outcome == SessionOutcome::UserQuit || config.max_packets.is_some() {
+            break;
+        }
+
+        renderer.reset_to_startup_geometry();
+        renderer.refresh_recordings_if_needed(&config.record_dir, true);
+
+        match outcome {
+            SessionOutcome::RestartForQualityChange => {
+                println!(
+                    "[Mobile Mirror] Reconfiguring Android stream for {} ({} Mbps @ {} FPS)...",
+                    settings.quality.label(),
+                    settings.bitrate_mbps,
+                    settings.target_fps
+                );
+                force_immediate_connect = true;
+            }
+            SessionOutcome::UserStoppedStream => {
+                // Pause automatic connection until user clicks "Start Mirroring"
+                settings.auto_connect_usb = false;
+                renderer.show_toast("Mirroring stopped — click 'Start Mirroring' to reconnect");
+            }
+            SessionOutcome::Disconnected => {
+                println!("[Mobile Mirror] USB stream ended — waiting for USB reconnection...");
+            }
+            SessionOutcome::UserQuit => break,
+        }
+    }
+}
+
+/// Runs the 60 FPS Bento Dashboard UI while `UsbAutoConnector` probes and initializes
+/// the Android USB session asynchronously in the background.
+fn run_startup_ui(
+    renderer: &mut Sdl3Renderer,
+    config: &ClientConfig,
+    settings: &mut AppSettings,
+    last_saved_recording: &mut Option<String>,
+    force_immediate_connect: bool,
+) -> Option<(StreamReader<TcpStream>, AdbSessionGuard)> {
+    let mut connector = UsbAutoConnector::new_with_config(
+        config.port,
+        settings.to_stream_quality(),
+        settings.auto_connect_usb || force_immediate_connect,
+    );
+    if force_immediate_connect {
+        connector.trigger_connect_now();
+    }
+
+    loop {
+        let actions = renderer.poll_dashboard_actions();
+        for action in actions {
+            match action {
+                UiAction::Quit => {
+                    connector.stop();
+                    return None;
+                }
+                UiAction::MinimizeWindow => renderer.minimize_window(),
+                UiAction::MaximizeRestoreWindow => renderer.toggle_maximize_window(),
+                UiAction::StartMirroring => {
+                    renderer.active_tab = NavTab::Home;
+                    settings.fullscreen_mirror = true;
+                    settings.auto_connect_usb = true;
+                    settings.save(&config.record_dir);
+                    connector.set_auto_connect(true);
+                    connector.set_quality(settings.to_stream_quality());
+                    connector.trigger_connect_now();
+                    if connector.device_serial().is_none() {
+                        renderer.show_toast(
+                            "Scanning USB... Connect your Android phone with USB debugging enabled",
+                        );
+                    } else {
+                        renderer.show_toast("Starting USB screen mirroring...");
+                    }
+                }
+                UiAction::StopMirroring => {
+                    settings.auto_connect_usb = false;
+                    connector.set_auto_connect(false);
+                }
+                UiAction::ToggleRecord => {
+                    settings.auto_record = !settings.auto_record;
+                    settings.save(&config.record_dir);
+                    if settings.auto_record {
+                        settings.auto_connect_usb = true;
+                        connector.set_auto_connect(true);
+                        connector.trigger_connect_now();
+                        renderer.show_toast(
+                            "Auto-Record ON: Recording will start automatically when mirroring begins",
+                        );
+                    } else {
+                        renderer.show_toast("Auto-Record OFF");
+                    }
+                }
+                UiAction::ToggleMic => {
+                    settings.mic_enabled = !settings.mic_enabled;
+                    settings.save(&config.record_dir);
+                    renderer.show_toast(if settings.mic_enabled {
+                        "Phone Microphone capture: ON (Voice Isolation DSP)"
+                    } else {
+                        "Phone Microphone capture: OFF"
+                    });
+                }
+                UiAction::SelectQuality(q) => {
+                    settings.apply_quality_preset(q);
+                    settings.save(&config.record_dir);
+                    connector.set_quality(settings.to_stream_quality());
+                    renderer.show_toast(format!(
+                        "Mirror Quality set to {} ({} Mbps @ {} FPS)",
+                        q.label(),
