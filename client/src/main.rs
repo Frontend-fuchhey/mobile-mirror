@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 4/6
+// [Mobile Mirror] Progressive implementation phase 5/6
 pub mod adb;
 pub mod decoder;
 pub mod ffi;
@@ -830,3 +830,211 @@ fn run_playback_loop(
                 UiAction::Quit => {
                     session_outcome = SessionOutcome::UserQuit;
                     running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                UiAction::MinimizeWindow => renderer.minimize_window(),
+                UiAction::MaximizeRestoreWindow => renderer.toggle_maximize_window(),
+                UiAction::StopMirroring => {
+                    session_outcome = SessionOutcome::UserStoppedStream;
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                UiAction::StartMirroring => {
+                    renderer.active_tab = NavTab::Home;
+                    settings.fullscreen_mirror = true;
+                }
+                UiAction::ToggleMic => {
+                    settings.mic_enabled = !settings.mic_enabled;
+                    settings.save(record_dir);
+                    control_writer.set_mic_enabled(settings.mic_enabled);
+                    renderer.show_toast(if settings.mic_enabled {
+                        "Phone Microphone: ON (Voice Isolation Active)"
+                    } else {
+                        "Phone Microphone: OFF"
+                    });
+                }
+                UiAction::ToggleRecord => {
+                    if is_recording {
+                        let _ = record_tx.send(RecorderCommand::Stop);
+                        is_recording = false;
+                        recording_start_time = None;
+                        if let Some(name) = active_recording_name.take() {
+                            *last_saved_recording = Some(format!("Saved {}", name));
+                            renderer.show_toast(format!("Recording saved: {}", name));
+                        }
+                        renderer.set_title("Mobile Mirror");
+                        renderer.refresh_recordings_if_needed(record_dir, true);
+                    } else {
+                        let now = chrono_timestamp();
+                        let file_name = format!("recording_{}.mp4", now);
+                        let path = record_dir.join(&file_name);
+                        println!("[Mobile Mirror] Recording started: {}", path.display());
+                        control_writer.request_keyframe();
+                        let _ = record_tx.send(RecorderCommand::Start {
+                            path,
+                            width: current_width,
+                            height: current_height,
+                            cached_config: cached_config_packet.clone(),
+                            cached_audio_config: cached_audio_config_packet.clone(),
+                        });
+                        recording_start_time = Some(Instant::now());
+                        active_recording_name = Some(file_name.clone());
+                        is_recording = true;
+                        renderer.show_toast(format!("Recording started: {}", file_name));
+                    }
+                }
+                UiAction::SelectQuality(q) => {
+                    if settings.quality != q {
+                        settings.apply_quality_preset(q);
+                        settings.save(record_dir);
+                        renderer.show_toast(format!(
+                            "Applying {} quality ({} Mbps)...",
+                            q.label(),
+                            settings.bitrate_mbps
+                        ));
+                        session_outcome = SessionOutcome::RestartForQualityChange;
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                UiAction::SwitchTab(tab) => {
+                    renderer.active_tab = tab;
+                    if tab == NavTab::Recordings || tab == NavTab::About {
+                        renderer.refresh_recordings_if_needed(record_dir, true);
+                    }
+                }
+                UiAction::OpenRecordingsFolder => {
+                    open_folder_in_explorer(record_dir);
+                    renderer.active_tab = NavTab::Recordings;
+                    renderer.refresh_recordings_if_needed(record_dir, true);
+                }
+                UiAction::PlayRecording(path) => open_media_file(&path),
+                UiAction::RevealRecording(path) => reveal_file_in_explorer(&path),
+                UiAction::DeleteRecording(path) => {
+                    if std::fs::remove_file(&path).is_ok() {
+                        renderer.refresh_recordings_if_needed(record_dir, true);
+                        renderer.show_toast("Deleted recording");
+                    }
+                }
+                UiAction::CycleFps => {
+                    settings.cycle_fps();
+                    settings.save(record_dir);
+                    session_outcome = SessionOutcome::RestartForQualityChange;
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                UiAction::CycleBitrate => {
+                    settings.cycle_bitrate();
+                    settings.save(record_dir);
+                    session_outcome = SessionOutcome::RestartForQualityChange;
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                UiAction::ToggleCbr => {
+                    settings.cbr_mode = !settings.cbr_mode;
+                    settings.save(record_dir);
+                    session_outcome = SessionOutcome::RestartForQualityChange;
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                UiAction::TogglePcAudio => {
+                    settings.pc_audio_enabled = !settings.pc_audio_enabled;
+                    settings.save(record_dir);
+                    if settings.pc_audio_enabled {
+                        audio_player = Sdl3AudioPlayer::new().ok();
+                        renderer.show_toast("PC Speaker Audio Playback: ON");
+                    } else {
+                        audio_player = None;
+                        renderer.show_toast("PC Speaker Audio Playback: OFF");
+                    }
+                }
+                UiAction::ToggleAutoConnect => {
+                    settings.auto_connect_usb = !settings.auto_connect_usb;
+                    settings.save(record_dir);
+                }
+                UiAction::ToggleAutoRecord => {
+                    settings.auto_record = !settings.auto_record;
+                    settings.save(record_dir);
+                }
+                UiAction::ToggleAlwaysOnTop => {
+                    settings.always_on_top = !settings.always_on_top;
+                    settings.save(record_dir);
+                    renderer.set_always_on_top(settings.always_on_top);
+                }
+                UiAction::CycleHwBackend => {
+                    settings.hw_backend = settings.hw_backend.next();
+                    settings.save(record_dir);
+                    renderer.show_toast(format!(
+                        "Decoder preference: {}",
+                        settings.hw_backend.label()
+                    ));
+                }
+                UiAction::ToggleFullscreenMirror => {
+                    if renderer.is_window_fullscreen() {
+                        renderer.set_window_fullscreen(false);
+                    }
+                    settings.fullscreen_mirror = !settings.fullscreen_mirror;
+                    settings.save(record_dir);
+                }
+                UiAction::ToggleWindowFullscreen => {
+                    if renderer.is_window_fullscreen() {
+                        renderer.set_window_fullscreen(false);
+                    } else {
+                        settings.fullscreen_mirror = true;
+                        renderer.set_window_fullscreen(true);
+                    }
+                }
+                UiAction::ResetDefaultSettings => {
+                    *settings = AppSettings::default();
+                    settings.save(record_dir);
+                    renderer.set_always_on_top(false);
+                    renderer.show_toast("Settings restored to defaults");
+                }
+            }
+        }
+
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let rec_elapsed_secs = recording_start_time
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        if is_recording && rec_elapsed_secs != last_rec_elapsed_secs {
+            last_rec_elapsed_secs = rec_elapsed_secs;
+            ui_dirty = true;
+        }
+
+        if last_second.elapsed() >= Duration::from_secs(1) {
+            if current_fps != fps_counter {
+                current_fps = fps_counter;
+                ui_dirty = true;
+            }
+            fps_counter = 0;
+            last_second = Instant::now();
+        }
+
+        if last_title_update.elapsed() >= Duration::from_millis(500) {
+            let title = if is_recording {
+                let mins = rec_elapsed_secs / 60;
+                let secs = rec_elapsed_secs % 60;
+                format!("Mobile Mirror — Recording {:02}:{:02}", mins, secs)
+            } else {
+                "Mobile Mirror".to_string()
+            };
+            renderer.set_title(&title);
+            last_title_update = Instant::now();
+        }
+
+        let first_packet = match rx.recv_timeout(Duration::from_millis(4)) {
+            Ok(pkt) => pkt,
+            Err(RecvTimeoutError::Timeout) => {
+                // Only redraw on timeout when UI state changed or at a gentle poll rate
+                // so idle redraws never compete with incoming video packets.
+                if ui_dirty || last_idle_render.elapsed() >= Duration::from_millis(16) {
+                    let toast_msg = renderer.active_toast().map(|s| s.to_string());
+                    let recs_snapshot = if renderer.active_tab == NavTab::Recordings {
+                        renderer.cached_recordings.clone()
+                    } else {
+                        Vec::new()
+                    };
