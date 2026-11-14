@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 1/2
 #![allow(non_camel_case_types, dead_code)]
 
 use crate::ffi::DynLib;
@@ -146,3 +145,150 @@ impl SDL_Event {
 /// Function pointer table for SDL3 (`SDL3.dll` / `libSDL3.so` / `libSDL3.dylib`).
 pub struct Sdl3Api {
     _lib: DynLib,
+    pub sdl_init: unsafe extern "C" fn(u32) -> bool,
+    pub sdl_quit: unsafe extern "C" fn(),
+    pub sdl_get_error: unsafe extern "C" fn() -> *const c_char,
+    pub sdl_create_window: unsafe extern "C" fn(*const c_char, c_int, c_int, u64) -> *mut SDL_Window,
+    pub sdl_destroy_window: unsafe extern "C" fn(*mut SDL_Window),
+    pub sdl_set_window_title: unsafe extern "C" fn(*mut SDL_Window, *const c_char) -> bool,
+    pub sdl_set_window_size: unsafe extern "C" fn(*mut SDL_Window, c_int, c_int) -> bool,
+    pub sdl_get_window_size: unsafe extern "C" fn(*mut SDL_Window, *mut c_int, *mut c_int) -> bool,
+    pub sdl_get_window_size_in_pixels:
+        Option<unsafe extern "C" fn(*mut SDL_Window, *mut c_int, *mut c_int) -> bool>,
+    pub sdl_get_window_display_scale: Option<unsafe extern "C" fn(*mut SDL_Window) -> f32>,
+    pub sdl_set_window_position: unsafe extern "C" fn(*mut SDL_Window, c_int, c_int) -> bool,
+    pub sdl_minimize_window: Option<unsafe extern "C" fn(*mut SDL_Window) -> bool>,
+    pub sdl_maximize_window: Option<unsafe extern "C" fn(*mut SDL_Window) -> bool>,
+    pub sdl_restore_window: Option<unsafe extern "C" fn(*mut SDL_Window) -> bool>,
+    pub sdl_set_window_fullscreen: Option<unsafe extern "C" fn(*mut SDL_Window, bool) -> bool>,
+    pub sdl_sync_window: Option<unsafe extern "C" fn(*mut SDL_Window) -> bool>,
+    pub sdl_get_window_flags: Option<unsafe extern "C" fn(*mut SDL_Window) -> u64>,
+    pub sdl_set_window_always_on_top: Option<unsafe extern "C" fn(*mut SDL_Window, bool) -> bool>,
+    pub sdl_set_window_bordered: Option<unsafe extern "C" fn(*mut SDL_Window, bool) -> bool>,
+    pub sdl_set_window_hit_test:
+        Option<unsafe extern "C" fn(*mut SDL_Window, Option<SDL_HitTest>, *mut c_void) -> bool>,
+    pub sdl_create_renderer:
+        unsafe extern "C" fn(*mut SDL_Window, *const c_char) -> *mut SDL_Renderer,
+    pub sdl_destroy_renderer: unsafe extern "C" fn(*mut SDL_Renderer),
+    pub sdl_set_render_vsync: unsafe extern "C" fn(*mut SDL_Renderer, c_int) -> bool,
+    pub sdl_set_render_scale: unsafe extern "C" fn(*mut SDL_Renderer, f32, f32) -> bool,
+    pub sdl_create_texture: unsafe extern "C" fn(
+        *mut SDL_Renderer,
+        u32,
+        c_int,
+        c_int,
+        c_int,
+    ) -> *mut SDL_Texture,
+    pub sdl_destroy_texture: unsafe extern "C" fn(*mut SDL_Texture),
+    pub sdl_update_texture: unsafe extern "C" fn(
+        *mut SDL_Texture,
+        *const c_void,
+        *const c_void,
+        c_int,
+    ) -> bool,
+    pub sdl_update_nv_texture: unsafe extern "C" fn(
+        *mut SDL_Texture,
+        *const c_void,
+        *const u8,
+        c_int,
+        *const u8,
+        c_int,
+    ) -> bool,
+    pub sdl_update_yuv_texture: unsafe extern "C" fn(
+        *mut SDL_Texture,
+        *const c_void,
+        *const u8,
+        c_int,
+        *const u8,
+        c_int,
+        *const u8,
+        c_int,
+    ) -> bool,
+    pub sdl_set_render_draw_color: unsafe extern "C" fn(*mut SDL_Renderer, u8, u8, u8, u8) -> bool,
+    pub sdl_render_rect: unsafe extern "C" fn(*mut SDL_Renderer, *const SDL_FRect) -> bool,
+    pub sdl_render_fill_rect: unsafe extern "C" fn(*mut SDL_Renderer, *const SDL_FRect) -> bool,
+    pub sdl_render_fill_rects:
+        unsafe extern "C" fn(*mut SDL_Renderer, *const SDL_FRect, c_int) -> bool,
+    pub sdl_render_debug_text:
+        unsafe extern "C" fn(*mut SDL_Renderer, f32, f32, *const c_char) -> bool,
+    pub sdl_render_clear: unsafe extern "C" fn(*mut SDL_Renderer) -> bool,
+    pub sdl_render_texture: unsafe extern "C" fn(
+        *mut SDL_Renderer,
+        *mut SDL_Texture,
+        *const SDL_FRect,
+        *const SDL_FRect,
+    ) -> bool,
+    pub sdl_render_present: unsafe extern "C" fn(*mut SDL_Renderer) -> bool,
+    pub sdl_poll_event: unsafe extern "C" fn(*mut SDL_Event) -> bool,
+    pub sdl_get_mouse_state: unsafe extern "C" fn(*mut f32, *mut f32) -> u32,
+    pub sdl_open_audio_device_stream: unsafe extern "C" fn(
+        u32,
+        *const SDL_AudioSpec,
+        Option<unsafe extern "C" fn(*mut c_void, *mut SDL_AudioStream, c_int, c_int)>,
+        *mut c_void,
+    ) -> *mut SDL_AudioStream,
+    pub sdl_put_audio_stream_data: unsafe extern "C" fn(*mut SDL_AudioStream, *const c_void, c_int) -> bool,
+    pub sdl_resume_audio_stream_device: unsafe extern "C" fn(*mut SDL_AudioStream) -> bool,
+    pub sdl_destroy_audio_stream: unsafe extern "C" fn(*mut SDL_AudioStream),
+}
+
+impl Sdl3Api {
+    pub fn load() -> Result<Self, String> {
+        let lib = DynLib::open_any(&[
+            "SDL3.dll",
+            "libSDL3.so.0",
+            "libSDL3.so",
+            "libSDL3.0.dylib",
+            "libSDL3.dylib",
+        ])?;
+
+        unsafe {
+            Ok(Self {
+                sdl_init: lib.get_sym("SDL_Init")?,
+                sdl_quit: lib.get_sym("SDL_Quit")?,
+                sdl_get_error: lib.get_sym("SDL_GetError")?,
+                sdl_create_window: lib.get_sym("SDL_CreateWindow")?,
+                sdl_destroy_window: lib.get_sym("SDL_DestroyWindow")?,
+                sdl_set_window_title: lib.get_sym("SDL_SetWindowTitle")?,
+                sdl_set_window_size: lib.get_sym("SDL_SetWindowSize")?,
+                sdl_get_window_size: lib.get_sym("SDL_GetWindowSize")?,
+                sdl_get_window_size_in_pixels: lib.get_sym("SDL_GetWindowSizeInPixels").ok(),
+                sdl_get_window_display_scale: lib.get_sym("SDL_GetWindowDisplayScale").ok(),
+                sdl_set_window_position: lib.get_sym("SDL_SetWindowPosition")?,
+                sdl_minimize_window: lib.get_sym("SDL_MinimizeWindow").ok(),
+                sdl_maximize_window: lib.get_sym("SDL_MaximizeWindow").ok(),
+                sdl_restore_window: lib.get_sym("SDL_RestoreWindow").ok(),
+                sdl_set_window_fullscreen: lib.get_sym("SDL_SetWindowFullscreen").ok(),
+                sdl_sync_window: lib.get_sym("SDL_SyncWindow").ok(),
+                sdl_get_window_flags: lib.get_sym("SDL_GetWindowFlags").ok(),
+                sdl_set_window_always_on_top: lib.get_sym("SDL_SetWindowAlwaysOnTop").ok(),
+                sdl_set_window_bordered: lib.get_sym("SDL_SetWindowBordered").ok(),
+                sdl_set_window_hit_test: lib.get_sym("SDL_SetWindowHitTest").ok(),
+                sdl_create_renderer: lib.get_sym("SDL_CreateRenderer")?,
+                sdl_destroy_renderer: lib.get_sym("SDL_DestroyRenderer")?,
+                sdl_set_render_vsync: lib.get_sym("SDL_SetRenderVSync")?,
+                sdl_set_render_scale: lib.get_sym("SDL_SetRenderScale")?,
+                sdl_create_texture: lib.get_sym("SDL_CreateTexture")?,
+                sdl_destroy_texture: lib.get_sym("SDL_DestroyTexture")?,
+                sdl_update_texture: lib.get_sym("SDL_UpdateTexture")?,
+                sdl_update_nv_texture: lib.get_sym("SDL_UpdateNVTexture")?,
+                sdl_update_yuv_texture: lib.get_sym("SDL_UpdateYUVTexture")?,
+                sdl_set_render_draw_color: lib.get_sym("SDL_SetRenderDrawColor")?,
+                sdl_render_rect: lib.get_sym("SDL_RenderRect")?,
+                sdl_render_fill_rect: lib.get_sym("SDL_RenderFillRect")?,
+                sdl_render_fill_rects: lib.get_sym("SDL_RenderFillRects")?,
+                sdl_render_debug_text: lib.get_sym("SDL_RenderDebugText")?,
+                sdl_render_clear: lib.get_sym("SDL_RenderClear")?,
+                sdl_render_texture: lib.get_sym("SDL_RenderTexture")?,
+                sdl_render_present: lib.get_sym("SDL_RenderPresent")?,
+                sdl_poll_event: lib.get_sym("SDL_PollEvent")?,
+                sdl_get_mouse_state: lib.get_sym("SDL_GetMouseState")?,
+                sdl_open_audio_device_stream: lib.get_sym("SDL_OpenAudioDeviceStream")?,
+                sdl_put_audio_stream_data: lib.get_sym("SDL_PutAudioStreamData")?,
+                sdl_resume_audio_stream_device: lib.get_sym("SDL_ResumeAudioStreamDevice")?,
+                sdl_destroy_audio_stream: lib.get_sym("SDL_DestroyAudioStream")?,
+                _lib: lib,
+            })
+        }
+    }
+}
