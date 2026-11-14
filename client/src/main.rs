@@ -1,4 +1,3 @@
-// [Mobile Mirror] Progressive implementation phase 5/6
 pub mod adb;
 pub mod decoder;
 pub mod ffi;
@@ -1038,3 +1037,211 @@ fn run_playback_loop(
                     } else {
                         Vec::new()
                     };
+                    let view_state = DashboardViewState {
+                        active_tab: renderer.active_tab,
+                        settings,
+                        headline: "Connected via USB",
+                        subtext: "Live hardware video stream active",
+                        is_connecting: false,
+                        is_warning: false,
+                        is_mirroring: true,
+                        device_serial: None,
+                        is_recording,
+                        rec_elapsed_secs,
+                        last_saved_recording: last_saved_recording.as_deref(),
+                        stream_width: current_width,
+                        stream_height: current_height,
+                        fps: current_fps,
+                        recordings: &recs_snapshot,
+                        status_toast: toast_msg.as_deref(),
+                    };
+                    renderer.render_dashboard(&view_state);
+                    last_idle_render = Instant::now();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Drain all queued packets (up to 64 per batch) so the channel never accumulates lag.
+        // Every H.264 NAL packet is fed to `decoder` in exact sequence to preserve P-frame
+        // reference integrity, while only the freshest decoded frame is uploaded and rendered.
+        let mut decoded_any_frame = false;
+        let mut batch_count = 0usize;
+        let mut next_pkt = Some(first_packet);
+
+        while let Some(packet) = next_pkt.take() {
+            if packet.is_audio {
+                if packet.is_config {
+                    cached_audio_config_packet = Some(Arc::clone(&packet));
+                    if is_recording {
+                        let _ = record_tx.try_send(RecorderCommand::Packet(Arc::clone(&packet)));
+                    }
+                } else if packet.is_keyframe {
+                    if is_recording {
+                        let _ = record_tx.try_send(RecorderCommand::Packet(Arc::clone(&packet)));
+                    }
+                } else if let Some(ref mut player) = audio_player {
+                    player.play(&packet.payload);
+                }
+            } else {
+                if packet.is_config {
+                    cached_config_packet = Some(Arc::clone(&packet));
+                }
+                if is_recording {
+                    let _ = record_tx.try_send(RecorderCommand::Packet(Arc::clone(&packet)));
+                }
+                if let Ok(true) = decoder.decode_packet(&packet) {
+                    fps_counter += 1;
+                    decoded_any_frame = true;
+                }
+            }
+
+            batch_count += 1;
+            if batch_count >= 64 {
+                break;
+            }
+            next_pkt = rx.try_recv().ok();
+        }
+
+        if decoded_any_frame {
+            decoder.with_current_frame(|frame_view| {
+                current_width = frame_view.width;
+                current_height = frame_view.height;
+                let _ = renderer.upload_video_frame(frame_view);
+            });
+        }
+
+        if decoded_any_frame || ui_dirty {
+            let toast_msg = renderer.active_toast().map(|s| s.to_string());
+            let recs_snapshot = if renderer.active_tab == NavTab::Recordings {
+                renderer.cached_recordings.clone()
+            } else {
+                Vec::new()
+            };
+            let view_state = DashboardViewState {
+                active_tab: renderer.active_tab,
+                settings,
+                headline: "Connected via USB",
+                subtext: "Live hardware video stream active",
+                is_connecting: false,
+                is_warning: false,
+                is_mirroring: true,
+                device_serial: None,
+                is_recording,
+                rec_elapsed_secs,
+                last_saved_recording: last_saved_recording.as_deref(),
+                stream_width: current_width,
+                stream_height: current_height,
+                fps: current_fps,
+                recordings: &recs_snapshot,
+                status_toast: toast_msg.as_deref(),
+            };
+            renderer.render_dashboard(&view_state);
+            last_idle_render = Instant::now();
+        }
+    }
+
+    let _ = record_tx.send(RecorderCommand::Quit);
+    let _ = recorder_handle.join();
+    if is_recording {
+        if let Some(name) = active_recording_name.take() {
+            *last_saved_recording = Some(format!("Saved {}", name));
+        }
+    }
+
+    session_outcome
+}
+
+#[cfg(windows)]
+#[allow(non_snake_case)]
+#[repr(C)]
+struct SYSTEMTIME {
+    wYear: u16,
+    wMonth: u16,
+    wDayOfWeek: u16,
+    wDay: u16,
+    wHour: u16,
+    wMinute: u16,
+    wSecond: u16,
+    wMilliseconds: u16,
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn GetLocalTime(lpSystemTime: *mut SYSTEMTIME);
+}
+
+fn chrono_timestamp() -> String {
+    #[cfg(windows)]
+    {
+        let mut st = SYSTEMTIME {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        unsafe {
+            GetLocalTime(&mut st);
+        }
+        format!(
+            "{:04}{:02}{:02}_{:02}{:02}{:02}",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        use std::time::SystemTime;
+        let dur = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = dur.as_secs();
+        let s = secs % 60;
+        let m = (secs / 60) % 60;
+        let h = (secs / 3600) % 24;
+        let days = secs / 86400;
+        format!("D{:05}_{:02}-{:02}-{:02}", days, h, m, s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_auto_usb_mode() {
+        let cfg = ClientConfig::default();
+        assert_eq!(cfg.startup_mode, StartupMode::AutoUsb);
+        assert_eq!(cfg.port, 12345);
+        assert_eq!(cfg.addr, "127.0.0.1:12345");
+        assert!(cfg.enable_display);
+    }
+
+    #[test]
+    fn start_bat_flags_parse_cleanly() {
+        let cfg = ClientConfig::parse_from([
+            "--port",
+            "12345",
+            "--record-dir",
+            "C:\\recordings",
+            "--hw-backend",
+            "nvdec",
+        ]);
+        assert_eq!(cfg.startup_mode, StartupMode::AutoUsb);
+        assert_eq!(cfg.port, 12345);
+        assert_eq!(cfg.record_dir, PathBuf::from("C:\\recordings"));
+        assert_eq!(cfg.preferred_hw.as_deref(), Some("nvdec"));
+    }
+
+    #[test]
+    fn direct_addr_switches_to_direct_connect_mode() {
+        let cfg = ClientConfig::parse_from(["--addr", "127.0.0.1:23456"]);
+        assert_eq!(cfg.startup_mode, StartupMode::DirectConnect);
+        assert_eq!(cfg.port, 23456);
+        assert_eq!(cfg.addr, "127.0.0.1:23456");
+    }
+}
