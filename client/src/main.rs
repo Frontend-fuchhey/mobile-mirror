@@ -1,4 +1,4 @@
-// [Mobile Mirror] Progressive implementation phase 3/6
+// [Mobile Mirror] Progressive implementation phase 4/6
 pub mod adb;
 pub mod decoder;
 pub mod ffi;
@@ -622,3 +622,211 @@ fn run_streaming_session(
             }
             running_net.store(false, Ordering::SeqCst);
         })
+        .expect("Failed to spawn network ingest thread");
+
+    let outcome = if let Some(rx) = decoder_rx {
+        run_playback_loop(
+            header,
+            existing_renderer,
+            &config.record_dir,
+            settings,
+            last_saved_recording,
+            control_writer,
+            rx,
+            Arc::clone(&running),
+        )
+    } else {
+        let _ = net_handle.join();
+        SessionOutcome::UserQuit
+    };
+
+    running.store(false, Ordering::SeqCst);
+
+    println!(
+        "[Mobile Mirror] Session summary — Packets: {}, Bytes: {}, Dropped: {}",
+        metrics.packets_dispatched.load(Ordering::Relaxed),
+        metrics.bytes_dispatched.load(Ordering::Relaxed),
+        metrics.decoder_drops.load(Ordering::Relaxed),
+    );
+
+    outcome
+}
+
+enum RecorderCommand {
+    Start {
+        path: PathBuf,
+        width: u32,
+        height: u32,
+        cached_config: Option<Arc<NalPacket>>,
+        cached_audio_config: Option<Arc<NalPacket>>,
+    },
+    Packet(Arc<NalPacket>),
+    Stop,
+    Quit,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_playback_loop(
+    header: StreamHeader,
+    existing_renderer: Option<&mut Sdl3Renderer>,
+    record_dir: &Path,
+    settings: &mut AppSettings,
+    last_saved_recording: &mut Option<String>,
+    mut control_writer: ControlWriter,
+    rx: Receiver<Arc<NalPacket>>,
+    running: Arc<AtomicBool>,
+) -> SessionOutcome {
+    let mut decoder = match HwDecoder::new(settings.hw_backend.cli_value()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "[Mobile Mirror ERROR] Failed to initialize video decoder: {}\n\
+                 Ensure FFmpeg DLLs (avcodec-63.dll, avutil-61.dll, avformat-63.dll, swresample-7.dll) are in client/lib/.",
+                e
+            );
+            return SessionOutcome::UserQuit;
+        }
+    };
+
+    let mut owned_renderer: Option<Sdl3Renderer> = None;
+    let renderer: &mut Sdl3Renderer = match existing_renderer {
+        Some(r) => {
+            r.set_title("Mobile Mirror");
+            r
+        }
+        None => match Sdl3Renderer::new("Mobile Mirror", DASHBOARD_WIDTH, DASHBOARD_HEIGHT) {
+            Ok(r) => owned_renderer.insert(r),
+            Err(e) => {
+                eprintln!(
+                    "[Mobile Mirror ERROR] Failed to create SDL3 window: {}\n\
+                     Ensure SDL3.dll is in client/lib/.",
+                    e
+                );
+                return SessionOutcome::UserQuit;
+            }
+        },
+    };
+
+    // Dedicated asynchronous MP4 recorder thread so disk I/O never blocks 60 FPS presentation
+    let (record_tx, record_rx) = std::sync::mpsc::sync_channel::<RecorderCommand>(2048);
+    let recorder_handle = thread::Builder::new()
+        .name("mp4-recorder".to_string())
+        .spawn(move || {
+            let mut active_muxer: Option<(NativeIsoMp4Muxer, PathBuf)> = None;
+            while let Ok(cmd) = record_rx.recv() {
+                match cmd {
+                    RecorderCommand::Start {
+                        path,
+                        width,
+                        height,
+                        cached_config,
+                        cached_audio_config,
+                    } => {
+                        if let Some((m, _)) = active_muxer.take() {
+                            let _ = m.finalize();
+                        }
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match NativeIsoMp4Muxer::new(&path, width, height) {
+                            Ok(mut muxer) => {
+                                if let Some(cfg) = cached_config {
+                                    let _ = muxer.write_packet(&cfg);
+                                }
+                                if let Some(acfg) = cached_audio_config {
+                                    let _ = muxer.write_packet(&acfg);
+                                }
+                                active_muxer = Some((muxer, path));
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[Mobile Mirror Recorder] Failed to create MP4 file: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    RecorderCommand::Packet(pkt) => {
+                        if let Some((ref mut muxer, _)) = active_muxer {
+                            let _ = muxer.write_packet(&pkt);
+                        }
+                    }
+                    RecorderCommand::Stop => {
+                        if let Some((muxer, path)) = active_muxer.take() {
+                            let _ = muxer.finalize();
+                            println!(
+                                "\n\x1b[92;1m[Mobile Mirror] Recording saved: {}\x1b[0m",
+                                path.display()
+                            );
+                        }
+                    }
+                    RecorderCommand::Quit => {
+                        if let Some((muxer, path)) = active_muxer.take() {
+                            let _ = muxer.finalize();
+                            println!(
+                                "\n\x1b[92;1m[Mobile Mirror] Recording saved: {}\x1b[0m",
+                                path.display()
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("Failed to spawn recorder worker thread");
+
+    let mut audio_player = if settings.pc_audio_enabled {
+        Sdl3AudioPlayer::new().ok()
+    } else {
+        None
+    };
+
+    let mut is_recording = false;
+    if settings.mic_enabled {
+        control_writer.set_mic_enabled(true);
+    }
+    let mut recording_start_time: Option<Instant> = None;
+    let mut active_recording_name: Option<String> = None;
+    let mut cached_config_packet: Option<Arc<NalPacket>> = None;
+    let mut cached_audio_config_packet: Option<Arc<NalPacket>> = None;
+
+    let mut current_width = header.width;
+    let mut current_height = header.height;
+    let mut fps_counter = 0u32;
+    let mut current_fps = settings.target_fps;
+    let mut last_second = Instant::now();
+    let mut last_title_update = Instant::now();
+    let mut last_idle_render = Instant::now();
+    let mut last_rec_elapsed_secs = 0u64;
+    let mut session_outcome = SessionOutcome::Disconnected;
+
+    // Default live mirroring sessions to the compact phone-shaped window.
+    // Users can still click `Dash` or press `[F]` during mirroring to inspect the dashboard.
+    settings.fullscreen_mirror = true;
+
+    if settings.auto_record {
+        let now = chrono_timestamp();
+        let file_name = format!("recording_{}.mp4", now);
+        let path = record_dir.join(&file_name);
+        println!("[Mobile Mirror] Auto-recording started: {}", path.display());
+        control_writer.request_keyframe();
+        let _ = record_tx.send(RecorderCommand::Start {
+            path,
+            width: current_width,
+            height: current_height,
+            cached_config: cached_config_packet.clone(),
+            cached_audio_config: cached_audio_config_packet.clone(),
+        });
+        recording_start_time = Some(Instant::now());
+        active_recording_name = Some(file_name);
+        is_recording = true;
+    }
+
+    while running.load(Ordering::Relaxed) {
+        let actions = renderer.poll_dashboard_actions();
+        let mut ui_dirty = !actions.is_empty();
+        for action in actions {
+            match action {
+                UiAction::Quit => {
+                    session_outcome = SessionOutcome::UserQuit;
+                    running.store(false, Ordering::SeqCst);
