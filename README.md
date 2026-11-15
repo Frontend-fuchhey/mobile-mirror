@@ -65,3 +65,26 @@ mobile-mirror/
 │       ├── net/               # Local NIO TCP server (127.0.0.1:12345) & packet streamer
 │       ├── video/             # Virtual display & hardware H.264 MediaCodec encoder
 │       └── wrappers/          # Reflective hidden API wrappers (Android 5 - 16+)
+├── scripts/                   # Automation scripts
+│   ├── build_all.ps1          # Compiles Android DEX server + Rust release client
+│   ├── run_mirror.ps1         # PowerShell standalone launcher script
+│   └── run_mirror.sh          # Bash standalone launcher script
+└── recordings/                # Output directory for recorded MP4 videos & persistent settings.cfg
+```
+
+---
+
+## Quick Start
+
+### 1. Launch Mobile Mirror (Windows)
+Double-click [`start.bat`](file:///c:/Users/asus/Desktop/mobile-mirror/start.bat) or run from terminal:
+```cmd
+.\start.bat
+```
+Plug in your Android phone over USB (with **Developer Options -> USB Debugging** enabled) or click **`Start Mirroring`**.
+
+### 2. Keyboard Shortcuts
+- **`[R]`** — Start / Stop lossless MP4 screen recording (saved to `recordings/`)
+- **`[M]`** — Toggle Phone Microphone Voice Recording ON / OFF (with real-time voice-isolation DSP)
+- **`[F]`** — Toggle between Embedded Dashboard Mirror View and Full-Window Mirror View
+- **`[Q]`** or **`[ESC]`** — Disconnect and close Mobile Mirror
