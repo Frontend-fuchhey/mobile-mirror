@@ -20,3 +20,26 @@ A real-time Android USB screen mirroring, voice-isolated audio capture, and zero
     8. **Always on Top Window** (`ON / OFF`)
     9. **Hardware Video Decoder Backend** (`Auto / NVDEC / D3D11VA / DXVA2`)
   - **`About` / `Help & Support`**: Interactive 4-step **USB Debugging Setup Guide**, live engine diagnostics, and a **`[Check USB Device Now]`** button.
+  - **Live Status Card (`Ready`)**: Displays real-time USB ADB status (`Ready — Waiting for device...`, `Connecting`, `Action Needed`, or `Live — <res> • <fps>fps`).
+- **Right Control Column**:
+  - **`Recording` Card**: Live tabular `00:00:00` (`HH:MM:SS`) recording timer, dynamic status pill (`Off` / `Auto` / `ON`), and **`[Start Recording]` / `[Stop Recording]`** button.
+  - **`Mirror Quality` Card**: 3-way segmented quality switcher (**`Auto`** native 12 Mbps, **`HD`** 720p 8 Mbps, **`FHD`** 1080p 16 Mbps) that dynamically configures (and live-reconfigures) the Android hardware H.264 encoder.
+  - **`Quick Tools` Card**: One-click shortcuts for **`Open Recordings`**, **`Settings`**, and **`Help & Support`**.
+
+---
+
+## Folder Structure
+
+```text
+mobile-mirror/
+├── start.bat                  # One-click Windows launcher (auto-builds & launches Mobile Mirror)
+├── README.md                  # Project documentation
+├── .gitignore                 # Git ignore rules
+├── client/                    # Rust PC Desktop Client (SDL3 + FFmpeg NVDEC/DXVA2)
+│   ├── Cargo.toml
+│   ├── build.rs
+│   ├── lib/                   # Runtime native shared libraries (FFmpeg + SDL3)
+│   └── src/
+│       ├── main.rs            # Entry point, Bento Dashboard event loop & live streaming session
+│       ├── settings.rs        # Persistent AppSettings, MirrorQuality, Recordings scanner & OS actions
+│       ├── adb.rs             # Non-blocking UsbAutoConnector, dynamic quality ADB pipeline & RAII guard
