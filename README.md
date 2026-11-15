@@ -43,3 +43,25 @@ mobile-mirror/
 │       ├── main.rs            # Entry point, Bento Dashboard event loop & live streaming session
 │       ├── settings.rs        # Persistent AppSettings, MirrorQuality, Recordings scanner & OS actions
 │       ├── adb.rs             # Non-blocking UsbAutoConnector, dynamic quality ADB pipeline & RAII guard
+│       ├── ui_canvas.rs       # High-DPI anti-aliased SDF UI canvas, 3D illustration & vector icons
+│       ├── protocol.rs        # Framed & raw Annex-B H.264/AAC/PCM stream reader
+│       ├── splitter.rs        # Zero-copy Arc<NalPacket> packet dispatcher
+│       ├── decoder.rs         # Hardware H.264 decoder (NVDEC / DXVA2 / D3D11VA)
+│       ├── renderer.rs        # SDL3 Bento Dashboard presenter, GPU YUV renderer & audio playback
+│       ├── muxer.rs           # Zero-copy MP4 muxer (H.264 video + AAC-LC audio)
+│       └── ffi/               # Dynamic library loader & FFmpeg/SDL3 bindings
+├── server/                    # Android DEX Capture Server (UID 2000 / app_process)
+│   ├── build.ps1              # Compiles Java sources & packages server.jar via d8
+│   ├── build.sh               # Linux/macOS DEX build script
+│   ├── build.gradle           # Gradle build definition
+│   ├── server.jar             # Compiled DEX archive pushed to /data/local/tmp/server.jar
+│   └── src/main/java/com/mirror/
+│       ├── Server.java        # CLI entry point (com.mirror.Server)
+│       ├── Options.java       # CLI parameter parser (port, max_size, bitrate, fps, cbr)
+│       ├── Workarounds.java   # Standalone app_process ActivityThread initialization
+│       ├── FakeContext.java   # Shell UID 2000 Context wrapper
+│       ├── audio/             # Internal audio & voice-isolated mic capture + AAC encoder
+│       ├── display/           # Display geometry models
+│       ├── net/               # Local NIO TCP server (127.0.0.1:12345) & packet streamer
+│       ├── video/             # Virtual display & hardware H.264 MediaCodec encoder
+│       └── wrappers/          # Reflective hidden API wrappers (Android 5 - 16+)
