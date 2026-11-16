@@ -534,7 +534,7 @@ impl Sdl3Renderer {
     }
 
     pub fn sync_window_geometry(&mut self, want_compact_phone: bool, video_w: u32, video_h: u32) {
-        if false && self.is_window_minimized() {
+        if self.is_window_minimized() {
             return;
         }
         unsafe {
@@ -703,7 +703,7 @@ impl Sdl3Renderer {
                             actions.push(UiAction::ToggleMic);
                         }
                     } else if key == 0x66 || key == 0x46 {
-                        actions.push(UiAction::ToggleWindowFullscreen);
+                        actions.push(UiAction::ToggleFullscreenMirror);
                     }
                 }
                 if event.event_type == SDL_EVENT_MOUSE_BUTTON_DOWN {
@@ -732,7 +732,7 @@ impl Sdl3Renderer {
     /// Renders the full Bento Dashboard (or the Compact Phone Window when `fullscreen_mirror` is active)
     /// using strict `UiCacheKey` dirty-checking so 99% of video frames skip CPU UI rasterization & PCIe uploads.
     pub fn render_dashboard(&mut self, state: &DashboardViewState<'_>) {
-        if false && self.is_window_minimized() {
+        if self.is_window_minimized() {
             return;
         }
         let vid_w = if self.tex_width > 0 {
@@ -2391,7 +2391,7 @@ fn draw_center_live_mirror_view(
     draw_small_pill(canvas, &full_rect, "Expand", full_bg, TEXT_PRIMARY);
     hit_zones.push(HitZone {
         rect: full_rect,
-        action: UiAction::ToggleWindowFullscreen,
+        action: UiAction::ToggleFullscreenMirror,
     });
 
     // True Fullscreen (F11) pill
@@ -3225,7 +3225,7 @@ fn draw_live_toolbar_strip_with_Zones(
     draw_small_pill(canvas, &dash_rect, dash_label, dash_bg, TEXT_PRIMARY);
     hit_zones.push(HitZone {
         rect: dash_rect,
-        action: UiAction::ToggleWindowFullscreen,
+        action: UiAction::ToggleFullscreenMirror,
     });
 
     // Draw Mic pill
