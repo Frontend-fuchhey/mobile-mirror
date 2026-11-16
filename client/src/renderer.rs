@@ -1375,7 +1375,7 @@ fn draw_bento_dashboard_canvas(
 
     hit_zones.push(HitZone {
         rect: min_rect,
-        action: UiAction::StopSession,
+        action: UiAction::MinimizeWindow,
     });
     hit_zones.push(HitZone {
         rect: max_rect,
@@ -3342,7 +3342,7 @@ fn draw_live_toolbar_strip_with_Zones(
     );
     hit_zones.push(HitZone {
         rect: min_rect,
-        action: UiAction::StopSession,
+        action: UiAction::MinimizeWindow,
     });
 
     // Draw Fullscreen / Restore (F11) button `□`
@@ -3854,7 +3854,7 @@ mod tests {
             first_btn_x
         );
         assert_eq!(zones.len(), 6);
-        assert!(zones.iter().any(|z| z.action == UiAction::StopSession));
+        assert!(zones.iter().any(|z| z.action == UiAction::MinimizeWindow));
         assert!(zones
             .iter()
             .any(|z| z.action == UiAction::ToggleWindowFullscreen));
