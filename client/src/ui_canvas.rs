@@ -27,7 +27,7 @@ pub const BG_SIDEBAR: Rgb = Rgb(246, 249, 255); // #F6F9FF Left Navigation Sideb
 pub const CARD_WHITE: Rgb = Rgb(255, 255, 255); // #FFFFFF Pure Elevated Card Surface
 pub const BORDER_SUBTLE: Rgb = Rgb(226, 232, 244); // #E2E8F4 Crisp 1px Cool-Tinted Hairline
 pub const CARD_BORDER: Rgb = Rgb(234, 239, 249); // #EAEFF9 Subtle Elevated Card Border
-pub const SHADOW_SLATE: Rgb = Rgb(15, 23, 42); // #1E293B Tinted Deep Slate Drop Shadow
+pub const SHADOW_SLATE: Rgb = Rgb(15, 23, 42); // #0F172A Tinted Deep Slate Drop Shadow
 
 // Brand & Accent Blues
 pub const APPLE_BLUE: Rgb = Rgb(21, 101, 240); // #1565F0 Primary Brand Blue (Active Nav, Auto Pill, Links)
@@ -55,7 +55,7 @@ pub const ERROR_BG: Rgb = Rgb(253, 232, 236); // #FDE8EC "Start Recording" Soft 
 pub const ERROR_BG_HOVER: Rgb = Rgb(250, 215, 222); // #FAD7DE "Start Recording" Hover Fill
 
 // Typography Ink Hierarchy (WCAG AAA/AA Compliant — High-Contrast Readable Slate)
-pub const TEXT_PRIMARY: Rgb = Rgb(15, 23, 42); // #1E293B Primary Display & Heading Ink
+pub const TEXT_PRIMARY: Rgb = Rgb(15, 23, 42); // #0F172A Primary Display & Heading Ink
 pub const TEXT_BODY: Rgb = Rgb(30, 41, 59); // #1E293B Navigation & Control Label Ink
 pub const TEXT_SECONDARY: Rgb = Rgb(64, 78, 102); // #404E66 Subtitles, Captions & Muted Meta
 
