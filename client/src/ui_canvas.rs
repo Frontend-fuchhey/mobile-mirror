@@ -1379,7 +1379,11 @@ impl UiCanvas {
     /// leading from shrinking rendered glyphs by 25%.
     #[inline]
     fn font_px_scale(font: &FontArc, px_size: f32, dpi_scale: f32) -> PxScale {
-        PxScale::from(px_size * dpi_scale)
+        let em_to_line_ratio = font
+            .units_per_em()
+            .map(|upm| (font.height_unscaled() / upm).clamp(1.0, 1.45))
+            .unwrap_or(1.33);
+        PxScale::from(px_size * dpi_scale * em_to_line_ratio)
     }
 
     /// Returns exact optical cap-height (height of uppercase `'H'`) in logical units for vertical pill centering.
