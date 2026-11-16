@@ -1,4 +1,3 @@
-// [Mobile Mirror] Real-time diagnostic logging and telemetry initialization
 pub mod adb;
 pub mod decoder;
 pub mod ffi;

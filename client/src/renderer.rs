@@ -1,7 +1,7 @@
 use crate::decoder::{DecodedFrameView, PixelLayout};
 use crate::ffi::sdl3::{
     Sdl3Api, SDL_AudioSpec, SDL_AudioStream, SDL_Event, SDL_FRect, SDL_Point, SDL_Renderer,
-    SDL_Texture, SDL_Window, SDLK_F, SDL_AUDIO_S16LE, SDL_EVENT_KEY_DOWN,
+    SDL_Texture, SDL_Window, SDLK_F11, SDL_AUDIO_S16LE, SDL_EVENT_KEY_DOWN,
     SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_QUIT, SDL_EVENT_WINDOW_CLOSE_REQUESTED,
     SDL_HITTEST_DRAGGABLE, SDL_HITTEST_NORMAL, SDL_HITTEST_RESIZE_BOTTOM,
     SDL_HITTEST_RESIZE_BOTTOMLEFT, SDL_HITTEST_RESIZE_BOTTOMRIGHT, SDL_HITTEST_RESIZE_LEFT,
@@ -677,7 +677,7 @@ impl Sdl3Renderer {
                 if event.event_type == SDL_EVENT_KEY_DOWN && !event.is_key_repeat() {
                     let key = event.keycode();
                     let scancode = event.scancode();
-                    if key == SDLK_F || scancode == SDL_SCANCODE_F11 {
+                    if key == SDLK_F11 || scancode == SDL_SCANCODE_F11 {
                         actions.push(UiAction::ToggleFullscreenMirror);
                     } else if key == 0x1B {
                         // Esc exits fullscreen if currently fullscreen; otherwise quits app
