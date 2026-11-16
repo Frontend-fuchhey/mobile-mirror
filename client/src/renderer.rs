@@ -1488,7 +1488,7 @@ fn draw_bento_dashboard_canvas(
 
     // 5. Bottom-Left Status Card ("Ready" / "Waiting for device...")
     let status_card_w = sidebar_w - 24.0;
-    let status_card_h = 76.0;
+    let status_card_h = 84.0;
     let status_card_y = (win_h - status_card_h - 20.0).max(320.0);
     canvas.draw_rounded_card(
         12.0,
@@ -2543,7 +2543,7 @@ fn draw_center_recordings_view(
     for (idx, entry) in state.recordings.iter().take(max_rows).enumerate() {
         let ry = card_y + 100.0 + idx as f32 * 68.0;
         let rx = card_x + 24.0;
-        let rw = card_w - 54.0;
+        let rw = card_w - 48.0;
         let rh = 58.0;
 
         canvas.draw_rounded_card(
@@ -2774,7 +2774,7 @@ fn draw_center_settings_view(
     let row_h = 53.0;
     let gap = 7.0;
     let rx = card_x + 24.0;
-    let rw = card_w - 54.0;
+    let rw = card_w - 48.0;
 
     for (idx, (title, desc, toggle_state, badge_text, action)) in rows.into_iter().enumerate() {
         let ry = start_y + idx as f32 * (row_h + gap);
@@ -2916,7 +2916,7 @@ fn draw_center_about_help_view(
     ];
 
     let rx = card_x + 24.0;
-    let rw = card_w - 54.0;
+    let rw = card_w - 48.0;
     for (idx, (st_title, st_desc)) in steps.iter().enumerate() {
         let sy = card_y + 88.0 + idx as f32 * 74.0;
         canvas.draw_rounded_card(
