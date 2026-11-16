@@ -1452,7 +1452,7 @@ impl UiCanvas {
                     let px = min_x + gx as i32;
                     let py = min_y + gy as i32;
                     // Optical stem darkening / sRGB gamma compensation for crisp legibility
-                    let boosted_cov = cov;
+                    let boosted_cov = cov.clamp(0.0, 1.0).powf(0.74);
                     self.blend_pixel(px, py, color, boosted_cov * opacity);
                 });
             }
