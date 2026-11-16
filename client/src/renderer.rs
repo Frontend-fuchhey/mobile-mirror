@@ -678,11 +678,11 @@ impl Sdl3Renderer {
                     let key = event.keycode();
                     let scancode = event.scancode();
                     if key == SDLK_F11 || scancode == SDL_SCANCODE_F11 {
-                        actions.push(UiAction::ToggleFullscreenMirror);
+                        actions.push(UiAction::ToggleWindowFullscreen);
                     } else if key == 0x1B {
                         // Esc exits fullscreen if currently fullscreen; otherwise quits app
                         if self.is_window_fullscreen() {
-                            actions.push(UiAction::ToggleFullscreenMirror);
+                            actions.push(UiAction::ToggleWindowFullscreen);
                         } else {
                             actions.push(UiAction::Quit);
                             return actions;
@@ -703,7 +703,7 @@ impl Sdl3Renderer {
                             actions.push(UiAction::ToggleMic);
                         }
                     } else if key == 0x66 || key == 0x46 {
-                        actions.push(UiAction::ToggleFullscreenMirror);
+                        actions.push(UiAction::ToggleWindowFullscreen);
                     }
                 }
                 if event.event_type == SDL_EVENT_MOUSE_BUTTON_DOWN {
@@ -2391,7 +2391,7 @@ fn draw_center_live_mirror_view(
     draw_small_pill(canvas, &full_rect, "Expand", full_bg, TEXT_PRIMARY);
     hit_zones.push(HitZone {
         rect: full_rect,
-        action: UiAction::ToggleFullscreenMirror,
+        action: UiAction::ToggleWindowFullscreen,
     });
 
     // True Fullscreen (F11) pill
@@ -2403,7 +2403,7 @@ fn draw_center_live_mirror_view(
     draw_small_pill(canvas, &f11_rect, "F11 Full", f11_bg, APPLE_BLUE);
     hit_zones.push(HitZone {
         rect: f11_rect,
-        action: UiAction::ToggleFullscreenMirror,
+        action: UiAction::ToggleWindowFullscreen,
     });
 
     // Disconnect pill
@@ -3225,7 +3225,7 @@ fn draw_live_toolbar_strip_with_Zones(
     draw_small_pill(canvas, &dash_rect, dash_label, dash_bg, TEXT_PRIMARY);
     hit_zones.push(HitZone {
         rect: dash_rect,
-        action: UiAction::ToggleFullscreenMirror,
+        action: UiAction::ToggleWindowFullscreen,
     });
 
     // Draw Mic pill
@@ -3422,7 +3422,7 @@ fn draw_live_toolbar_strip_with_Zones(
     }
     hit_zones.push(HitZone {
         rect: full_rect,
-        action: UiAction::ToggleFullscreenMirror,
+        action: UiAction::ToggleWindowFullscreen,
     });
 
     // Draw Close / Disconnect button `✕`
@@ -3857,6 +3857,6 @@ mod tests {
         assert!(zones.iter().any(|z| z.action == UiAction::StopSession));
         assert!(zones
             .iter()
-            .any(|z| z.action == UiAction::ToggleFullscreenMirror));
+            .any(|z| z.action == UiAction::ToggleWindowFullscreen));
     }
 }
