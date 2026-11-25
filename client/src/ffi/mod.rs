@@ -33,8 +33,15 @@ fn candidate_lib_dirs() -> Vec<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             dirs.push(exe_dir.join("lib"));
+            dirs.push(exe_dir.join("..").join("lib"));
+            #[cfg(target_os = "macos")]
+            {
+                dirs.push(exe_dir.join("..").join("Frameworks"));
+                dirs.push(exe_dir.join("..").join("Resources").join("lib"));
+            }
             dirs.push(exe_dir.join("..").join("..").join("lib"));
             dirs.push(exe_dir.join("..").join("..").join("..").join("lib"));
+            dirs.push(exe_dir.to_path_buf());
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
@@ -45,6 +52,19 @@ fn candidate_lib_dirs() -> Vec<std::path::PathBuf> {
         env!("CARGO_MANIFEST_DIR"),
         "/lib"
     )));
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(std::path::PathBuf::from("/opt/homebrew/lib"));
+        dirs.push(std::path::PathBuf::from("/usr/local/lib"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push(std::path::PathBuf::from("/usr/local/lib"));
+        dirs.push(std::path::PathBuf::from("/usr/lib/x86_64-linux-gnu"));
+        dirs.push(std::path::PathBuf::from("/usr/lib/aarch64-linux-gnu"));
+        dirs.push(std::path::PathBuf::from("/usr/lib64"));
+        dirs.push(std::path::PathBuf::from("/usr/lib"));
+    }
     dirs
 }
 
@@ -55,7 +75,20 @@ fn configure_dll_search_path() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             for dir in candidate_lib_dirs() {
-                if dir.is_dir() {
+                let has_dll = dir.is_dir()
+                    && std::fs::read_dir(&dir)
+                        .ok()
+                        .map(|rd| {
+                            rd.flatten().any(|e| {
+                                e.path()
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .map(|ext| ext.eq_ignore_ascii_case("dll"))
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                if has_dll {
                     let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
                     let path_str = canonical.to_string_lossy();
                     let clean_path = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);

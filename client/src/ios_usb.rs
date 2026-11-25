@@ -1,10 +1,14 @@
 //! Apple iOS USB QuickTime / CoreMedia screen & audio mirroring over `nusb`.
 //!
-//! This module implements:
+//! Implements the full QuickTime / CoreMediaIO USB protocol (`quicktime_video_hack` wire format):
 //! - USB device discovery and driver/trust probing (`probe_ios_usb`, `IosUsbProbe`)
 //! - Apple QuickTime mode-switch vendor control transfer (`0x40 / 0x52 / 0x0000 / 0x0002`)
-//! - CoreMedia USB bulk framing (`PING`, `SYNC`, `ASYN`, `FEED`, `RPLY`, `EAT!`, `HPD1`, `HPA1`, `CWPA`, `OG`, `AFMT`, `CFMT`, `TIME`)
-//! - `CMSampleBuffer` (`sbuf` / `stia` / `sdat` / `avcC`) parsing to Annex-B H.264 `NalPacket`s and 48 kHz LPCM audio packets.
+//! - CoreMedia USB bulk framing (`PING`, `SYNC`, `ASYN`, `RPLY`) with full `clock_ref` +
+//!   `correlation_id` tracking and `dict`/`keyv`/`strk`/`strv`/`numv`/`bool`/`asbd` binary atoms
+//! - Handshake handling for `CWPA`, `HPD1`, `HPA1`, `AFMT`, `CVRP`, `OG`/`GOOG`, `CLOK`, `TIME`,
+//!   `SKEW`, `NEED`, `FEED`, `EAT!`, `STOP`, and clean `HPD0`/`HPA0` teardown
+//! - `CMSampleBuffer` (`sbuf` / `stia` / `sdat` / `avcC`) parsing to Annex-B H.264 `NalPacket`s
+//!   and 48 kHz stereo 16-bit LPCM audio packets.
 
 use std::collections::VecDeque;
 use std::io;
@@ -36,17 +40,23 @@ const QT_SWITCH_INDEX: u16 = 0x0002;
 /// Maximum CoreMedia frame size accepted (16 MiB) to guard against corrupt length prefixes.
 const MAX_COREMEDIA_FRAME_LEN: usize = 16 * 1024 * 1024;
 
-/// CoreMedia 4CC magic constants (stored in wire little-endian order).
+/// CoreMedia 4CC magic constants (stored in wire little-endian order via `to_le_bytes()`).
 pub const MAGIC_PING: u32 = u32::from_be_bytes(*b"ping");
 pub const MAGIC_SYNC: u32 = u32::from_be_bytes(*b"sync");
 pub const MAGIC_ASYN: u32 = u32::from_be_bytes(*b"asyn");
 pub const MAGIC_FEED: u32 = u32::from_be_bytes(*b"feed");
 pub const MAGIC_RPLY: u32 = u32::from_be_bytes(*b"rply");
 pub const MAGIC_CWPA: u32 = u32::from_be_bytes(*b"cwpa");
+pub const MAGIC_CVRP: u32 = u32::from_be_bytes(*b"cvrp");
+pub const MAGIC_CLOK: u32 = u32::from_be_bytes(*b"clok");
+pub const MAGIC_SKEW: u32 = u32::from_be_bytes(*b"skew");
+pub const MAGIC_STOP: u32 = u32::from_be_bytes(*b"stop");
 pub const MAGIC_AFMT: u32 = u32::from_be_bytes(*b"afmt");
 pub const MAGIC_CFMT: u32 = u32::from_be_bytes(*b"cfmt");
 pub const MAGIC_HPD1: u32 = u32::from_be_bytes(*b"hpd1");
+pub const MAGIC_HPD0: u32 = u32::from_be_bytes(*b"hpd0");
 pub const MAGIC_HPA1: u32 = u32::from_be_bytes(*b"hpa1");
+pub const MAGIC_HPA0: u32 = u32::from_be_bytes(*b"hpa0");
 pub const MAGIC_EAT: u32 = u32::from_be_bytes(*b"eat!");
 pub const MAGIC_TIME: u32 = u32::from_be_bytes(*b"time");
 pub const MAGIC_GOOG: u32 = u32::from_be_bytes(*b"goog");
@@ -59,6 +69,15 @@ pub const MAGIC_FDSC: u32 = u32::from_be_bytes(*b"fdsc");
 pub const MAGIC_AVCC: u32 = u32::from_be_bytes(*b"avcC");
 pub const MAGIC_VIDE: u32 = u32::from_be_bytes(*b"vide");
 pub const MAGIC_SOUN: u32 = u32::from_be_bytes(*b"soun");
+
+// CoreMedia binary dictionary / value atom tags
+const MAGIC_DICT: u32 = u32::from_be_bytes(*b"dict");
+const MAGIC_KEYV: u32 = u32::from_be_bytes(*b"keyv");
+const MAGIC_STRK: u32 = u32::from_be_bytes(*b"strk");
+const MAGIC_NUMV: u32 = u32::from_be_bytes(*b"numv");
+const MAGIC_BOOL: u32 = u32::from_be_bytes(*b"bool");
+const MAGIC_ASBD: u32 = u32::from_be_bytes(*b"asbd");
+const MAGIC_LPCM: u32 = u32::from_be_bytes(*b"lpcm");
 
 const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
@@ -119,9 +138,7 @@ pub fn probe_ios_usb() -> IosUsbProbe {
 
         match info.open().wait() {
             Ok(dev) => {
-                // Verify we can read the active configuration or claim an interface.
-                let cfg_ok = dev.active_configuration().is_ok();
-                if cfg_ok {
+                if dev.active_configuration().is_ok() {
                     return IosUsbProbe::Ready {
                         serial,
                         product_name,
@@ -129,18 +146,15 @@ pub fn probe_ios_usb() -> IosUsbProbe {
                 }
                 return IosUsbProbe::NeedsDriverOrTrust {
                     serial,
-                    reason: "Device opened, but no active USB configuration was found. \
-                             Unlock the device and tap 'Trust This Computer'."
+                    reason: "Unlock iPhone & tap 'Trust This Computer', or mirror wirelessly via AirPlay."
                         .to_string(),
                 };
             }
-            Err(e) => {
+            Err(_) => {
                 return IosUsbProbe::NeedsDriverOrTrust {
                     serial,
-                    reason: format!(
-                        "Cannot open Apple iOS USB device ({e}). Ensure WinUSB driver is \
-                         installed (e.g. via Zadig) and 'Trust This Computer' is accepted."
-                    ),
+                    reason: "iPhone USB needs WinUSB driver on Windows (via Zadig), or use Wireless AirPlay instead."
+                        .to_string(),
                 };
             }
         }
@@ -148,6 +162,10 @@ pub fn probe_ios_usb() -> IosUsbProbe {
 
     IosUsbProbe::NoDevice
 }
+
+// ---------------------------------------------------------------------------
+// CoreMedia Binary Framing & Dictionary Atom Builders
+// ---------------------------------------------------------------------------
 
 /// A parsed CoreMedia USB frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,9 +176,6 @@ pub struct CoreMediaFrame<'a> {
 }
 
 /// Parses a single CoreMedia USB frame (`[total_len: u32 LE][magic: 4CC][payload...]`).
-///
-/// Returns `Ok(None)` if `buf` does not yet contain a complete frame, or `Err(InvalidData)`
-/// if the declared length is smaller than 8 bytes or exceeds `MAX_COREMEDIA_FRAME_LEN`.
 pub fn parse_coremedia_frame(buf: &[u8]) -> io::Result<Option<(CoreMediaFrame<'_>, usize)>> {
     if buf.len() < 8 {
         return Ok(None);
@@ -189,7 +204,7 @@ pub fn parse_coremedia_frame(buf: &[u8]) -> io::Result<Option<(CoreMediaFrame<'_
     )))
 }
 
-/// Serializes a CoreMedia USB frame with `[total_len: u32 LE][magic: u32 LE][payload]`.
+/// Serializes a CoreMedia USB frame or nested atom with `[total_len: u32 LE][magic: u32 LE][payload]`.
 pub fn build_coremedia_frame(magic: u32, payload: &[u8]) -> Vec<u8> {
     let total_len = (8 + payload.len()) as u32;
     let mut out = Vec::with_capacity(total_len as usize);
@@ -198,6 +213,93 @@ pub fn build_coremedia_frame(magic: u32, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(payload);
     out
 }
+
+fn build_cm_keyv(key: &str, value_atom: &[u8]) -> Vec<u8> {
+    let key_atom = build_coremedia_frame(MAGIC_STRK, key.as_bytes());
+    let mut body = Vec::with_capacity(key_atom.len() + value_atom.len());
+    body.extend_from_slice(&key_atom);
+    body.extend_from_slice(value_atom);
+    build_coremedia_frame(MAGIC_KEYV, &body)
+}
+
+fn build_cm_dict(entries: &[Vec<u8>]) -> Vec<u8> {
+    let total: usize = entries.iter().map(|e| e.len()).sum();
+    let mut body = Vec::with_capacity(total);
+    for e in entries {
+        body.extend_from_slice(e);
+    }
+    build_coremedia_frame(MAGIC_DICT, &body)
+}
+
+fn build_cm_num_i32(val: i32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(5);
+    body.push(3u8); // CFNumber kCFNumberSInt32Type
+    body.extend_from_slice(&val.to_le_bytes());
+    build_coremedia_frame(MAGIC_NUMV, &body)
+}
+
+fn build_cm_num_f64(val: f64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(9);
+    body.push(6u8); // CFNumber kCFNumberFloat64Type
+    body.extend_from_slice(&val.to_le_bytes());
+    build_coremedia_frame(MAGIC_NUMV, &body)
+}
+
+fn build_cm_bool(val: bool) -> Vec<u8> {
+    build_coremedia_frame(MAGIC_BOOL, &[u8::from(val)])
+}
+
+/// Builds the 40-byte CoreAudio `AudioStreamBasicDescription` (`asbd`) atom for 48 kHz 16-bit stereo LPCM.
+pub fn build_lpcm_48khz_asbd_atom() -> Vec<u8> {
+    let mut asbd = Vec::with_capacity(40);
+    asbd.extend_from_slice(&48000.0f64.to_le_bytes()); // mSampleRate
+    asbd.extend_from_slice(&MAGIC_LPCM.to_le_bytes()); // mFormatID = 'lpcm'
+    asbd.extend_from_slice(&0x0000_000Cu32.to_le_bytes()); // mFormatFlags = SignedInteger | Packed
+    asbd.extend_from_slice(&4u32.to_le_bytes()); // mBytesPerPacket
+    asbd.extend_from_slice(&1u32.to_le_bytes()); // mFramesPerPacket
+    asbd.extend_from_slice(&4u32.to_le_bytes()); // mBytesPerFrame
+    asbd.extend_from_slice(&2u32.to_le_bytes()); // mChannelsPerFrame
+    asbd.extend_from_slice(&16u32.to_le_bytes()); // mBitsPerChannel
+    asbd.extend_from_slice(&0u32.to_le_bytes()); // mReserved
+    build_coremedia_frame(MAGIC_ASBD, &asbd)
+}
+
+/// Builds the `HPD1` hot-plug video display configuration dictionary sent to iOS after `CWPA`.
+pub fn build_hpd1_video_config_dict(target_fps: u32) -> Vec<u8> {
+    let size_dict = build_cm_dict(&[
+        build_cm_keyv("Width", &build_cm_num_f64(1920.0)),
+        build_cm_keyv("Height", &build_cm_num_f64(1080.0)),
+    ]);
+    build_cm_dict(&[
+        build_cm_keyv("DisplaySize", &size_dict),
+        build_cm_keyv("MaxFPS", &build_cm_num_i32(target_fps.clamp(15, 120) as i32)),
+        build_cm_keyv("HEVC", &build_cm_bool(false)),
+    ])
+}
+
+/// Builds the `HPA1` hot-plug audio configuration dictionary sent to iOS after `CWPA`.
+pub fn build_hpa1_audio_config_dict() -> Vec<u8> {
+    build_cm_dict(&[build_cm_keyv("asbd", &build_lpcm_48khz_asbd_atom())])
+}
+
+/// Builds a 24-byte `CMTime` struct (`value: i64 LE, timescale: i32 LE, flags: u32 LE, epoch: i64 LE`).
+pub fn build_cmtime_ns(elapsed_ns: i64) -> [u8; 24] {
+    let mut out = [0u8; 24];
+    out[0..8].copy_from_slice(&elapsed_ns.to_le_bytes());
+    out[8..12].copy_from_slice(&1_000_000_000i32.to_le_bytes()); // timescale = 1 GHz (nanoseconds)
+    out[12..16].copy_from_slice(&1u32.to_le_bytes()); // kCMTimeFlags_Valid = 1
+    out[16..24].copy_from_slice(&0i64.to_le_bytes()); // epoch = 0
+    out
+}
+
+/// Builds an `AFMT` / `CFMT` success reply dictionary (`{ "Error": 0 }`).
+fn build_afmt_reply_dict() -> Vec<u8> {
+    build_cm_dict(&[build_cm_keyv("Error", &build_cm_num_i32(0))])
+}
+
+// ---------------------------------------------------------------------------
+// H.264 avcC / AVCC & LPCM SampleBuffer Parsers
+// ---------------------------------------------------------------------------
 
 /// Parses an ISO/IEC 14496-15 `AVCDecoderConfigurationRecord` (`avcC`) into an Annex-B
 /// byte stream containing all SPS and PPS NAL units, along with the AVCC NAL length size
@@ -350,8 +452,6 @@ pub fn parse_lpcm_48khz_audio(sdat: &[u8]) -> Option<Vec<u8>> {
 
 /// Parses a CoreMedia `stia` (Sample Timing Info Array) atom to extract PTS in microseconds.
 fn parse_stia_pts_us(stia: &[u8]) -> Option<u64> {
-    // CMTime: value (i64 LE), timescale (i32 LE), flags (u32 LE), epoch (i64 LE).
-    // In `stia`, PTS typically starts at offset 24 (after duration CMTime) or offset 0.
     let try_cmtime = |slice: &[u8]| -> Option<u64> {
         if slice.len() < 24 {
             return None;
@@ -452,13 +552,16 @@ fn walk_cm_atoms<'a>(data: &'a [u8], out: &mut ParsedSampleBuffer<'a>, depth: u8
 /// Finds the `sbuf` atom inside a `FEED` payload (skipping an optional 8-byte `clock_ref` prefix).
 fn extract_sample_buffer<'a>(feed_payload: &'a [u8]) -> ParsedSampleBuffer<'a> {
     let mut parsed = ParsedSampleBuffer::default();
-    // Try direct atom walk first, then offset +8 (clock_ref prefix).
     walk_cm_atoms(feed_payload, &mut parsed, 0);
     if parsed.sdat.is_none() && parsed.avcc.is_none() && feed_payload.len() > 16 {
         walk_cm_atoms(&feed_payload[8..], &mut parsed, 0);
     }
     parsed
 }
+
+// ---------------------------------------------------------------------------
+// Shared Packet Queue & Session
+// ---------------------------------------------------------------------------
 
 struct SharedQueue {
     queue: Mutex<VecDeque<NalPacket>>,
@@ -479,7 +582,6 @@ impl SharedQueue {
 
     fn push(&self, pkt: NalPacket) {
         if let Ok(mut q) = self.queue.lock() {
-            // Bound queue to prevent unbounded memory growth if consumer stalls.
             if q.len() >= 512 {
                 q.pop_front();
             }
@@ -570,8 +672,8 @@ impl IosUsbSession {
         Ok(Self {
             header: StreamHeader {
                 codec_id: CODEC_ID_H264,
-                width: 0,
-                height: 0,
+                width: 1920,
+                height: 1080,
                 framed: true,
             },
             device_name,
@@ -618,6 +720,10 @@ impl Drop for IosUsbSession {
         self.shutdown();
     }
 }
+
+// ---------------------------------------------------------------------------
+// USB Mode Switch & CoreMedia Protocol Loop
+// ---------------------------------------------------------------------------
 
 /// Finds the QuickTime bulk interface (`class 0xFF, subclass 0x2A`) and its IN/OUT bulk endpoints.
 fn find_quicktime_endpoints(device: &Device) -> Option<(u8, u8, u8)> {
@@ -721,7 +827,7 @@ fn open_and_switch_quicktime_interface() -> io::Result<(String, Device, Interfac
     drop(device);
 
     // Wait for USB re-enumeration with the QuickTime bulk interface active.
-    for _ in 0..20 {
+    for _ in 0..24 {
         thread::sleep(Duration::from_millis(250));
         if let Ok((re_info, re_name)) = find_apple() {
             if let Ok(re_dev) = re_info.open().wait() {
@@ -740,7 +846,7 @@ fn open_and_switch_quicktime_interface() -> io::Result<(String, Device, Interfac
 
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        "Apple iOS device did not expose QuickTime bulk interface after mode switch",
+        "iPhone did not expose QuickTime USB interface (install WinUSB via Zadig or use Wireless AirPlay)",
     ))
 }
 
@@ -771,11 +877,12 @@ fn send_sync_reply(
 
 fn send_asyn_packet(
     ep_out: &mut Endpoint<Bulk, Out>,
+    clock_ref: u64,
     sub_magic: u32,
     body: &[u8],
 ) -> io::Result<()> {
     let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(&0u64.to_le_bytes()); // clock/object ref
+    payload.extend_from_slice(&clock_ref.to_le_bytes());
     payload.extend_from_slice(&sub_magic.to_le_bytes());
     payload.extend_from_slice(body);
     send_bulk_frame(ep_out, MAGIC_ASYN, &payload)
@@ -795,6 +902,11 @@ fn run_coremedia_loop(
     let mut nal_length_size: usize = 4;
     let mut synthetic_pts_us: u64 = 0;
     let frame_step_us: u64 = 1_000_000 / (target_fps.max(1) as u64);
+
+    let session_start = Instant::now();
+    let mut next_local_clock: u64 = 0x1000_0001;
+    let mut device_audio_clock_ref: u64 = 0;
+    let mut device_video_clock_ref: u64 = 0;
     let mut plugged_virtual_devices = false;
 
     while !shutdown.load(Ordering::Acquire) {
@@ -827,80 +939,152 @@ fn run_coremedia_loop(
                             }
                         }
                         MAGIC_SYNC => {
-                            let corr = if payload.len() >= 8 {
-                                &payload[..8]
-                            } else {
-                                &[0u8; 8]
-                            };
-                            let sub_magic = if payload.len() >= 12 {
-                                u32::from_le_bytes([
-                                    payload[8],
-                                    payload[9],
-                                    payload[10],
-                                    payload[11],
-                                ])
+                            // CoreMedia SYNC wire layout:
+                            // [clock_ref: u64 LE][sub_magic: u32 LE][correlation_id: u64 LE][body...]
+                            let clock_ref = if payload.len() >= 8 {
+                                u64::from_le_bytes(payload[0..8].try_into().unwrap())
                             } else {
                                 0
                             };
-
-                            let extra: &[u8] = match sub_magic {
-                                MAGIC_CWPA => &1u64.to_le_bytes(),
-                                MAGIC_OG | MAGIC_GOOG => &MAGIC_GOOG.to_le_bytes(),
-                                MAGIC_AFMT | MAGIC_CFMT => &[],
-                                _ => &[],
+                            let sub_magic = if payload.len() >= 12 {
+                                u32::from_le_bytes(payload[8..12].try_into().unwrap())
+                            } else {
+                                0
                             };
-                            if let Err(e) = send_sync_reply(&mut ep_out, corr, extra) {
+                            let corr: &[u8] = if payload.len() >= 20 {
+                                &payload[12..20]
+                            } else if payload.len() >= 8 {
+                                &payload[0..8]
+                            } else {
+                                &[0u8; 8]
+                            };
+
+                            let reply_extra: Vec<u8> = match sub_magic {
+                                MAGIC_CWPA => {
+                                    device_audio_clock_ref = clock_ref;
+                                    let local_clock = next_local_clock;
+                                    next_local_clock += 1;
+                                    local_clock.to_le_bytes().to_vec()
+                                }
+                                MAGIC_CVRP => {
+                                    device_video_clock_ref = clock_ref;
+                                    let local_clock = next_local_clock;
+                                    next_local_clock += 1;
+                                    local_clock.to_le_bytes().to_vec()
+                                }
+                                MAGIC_CLOK => {
+                                    let local_clock = next_local_clock;
+                                    next_local_clock += 1;
+                                    local_clock.to_le_bytes().to_vec()
+                                }
+                                MAGIC_OG | MAGIC_GOOG => MAGIC_GOOG.to_le_bytes().to_vec(),
+                                MAGIC_AFMT | MAGIC_CFMT => build_afmt_reply_dict(),
+                                MAGIC_TIME => {
+                                    let elapsed_ns = session_start.elapsed().as_nanos() as i64;
+                                    build_cmtime_ns(elapsed_ns).to_vec()
+                                }
+                                MAGIC_SKEW => 48000.0f64.to_le_bytes().to_vec(),
+                                MAGIC_STOP => Vec::new(),
+                                _ => Vec::new(),
+                            };
+
+                            if let Err(e) = send_sync_reply(&mut ep_out, corr, &reply_extra) {
                                 shared.close(Some(e.to_string()));
                                 return;
                             }
 
+                            // After CWPA, hot-plug virtual display (HPD1) and audio sink (HPA1)
+                            // with full CoreMedia binary dictionaries.
                             if !plugged_virtual_devices && sub_magic == MAGIC_CWPA {
                                 plugged_virtual_devices = true;
+                                let hpd1_dict = build_hpd1_video_config_dict(target_fps);
+                                let _ = send_asyn_packet(&mut ep_out, 0, MAGIC_HPD1, &hpd1_dict);
+                                let hpa1_dict = build_hpa1_audio_config_dict();
                                 let _ = send_asyn_packet(
                                     &mut ep_out,
-                                    MAGIC_HPD1,
-                                    &target_fps.to_le_bytes(),
+                                    device_audio_clock_ref,
+                                    MAGIC_HPA1,
+                                    &hpa1_dict,
                                 );
-                                let _ = send_asyn_packet(&mut ep_out, MAGIC_HPA1, &[]);
-                                let _ = send_asyn_packet(&mut ep_out, MAGIC_NEED, &[]);
+                            }
+
+                            // After CVRP, prime the video frame pump with NEED requests
+                            if sub_magic == MAGIC_CVRP && device_video_clock_ref != 0 {
+                                let _ = send_asyn_packet(
+                                    &mut ep_out,
+                                    device_video_clock_ref,
+                                    MAGIC_NEED,
+                                    &[],
+                                );
+                                let _ = send_asyn_packet(
+                                    &mut ep_out,
+                                    device_video_clock_ref,
+                                    MAGIC_NEED,
+                                    &[],
+                                );
                             }
                         }
                         MAGIC_ASYN => {
+                            let clock_ref = if payload.len() >= 8 {
+                                u64::from_le_bytes(payload[0..8].try_into().unwrap())
+                            } else {
+                                0
+                            };
                             let sub_magic = if payload.len() >= 12 {
-                                u32::from_le_bytes([
-                                    payload[8],
-                                    payload[9],
-                                    payload[10],
-                                    payload[11],
-                                ])
+                                u32::from_le_bytes(payload[8..12].try_into().unwrap())
                             } else if payload.len() >= 4 {
-                                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
+                                u32::from_le_bytes(payload[0..4].try_into().unwrap())
                             } else {
                                 0
                             };
 
                             if sub_magic == MAGIC_TIME {
-                                let _ = send_asyn_packet(&mut ep_out, MAGIC_TIME, &[]);
+                                let elapsed_ns = session_start.elapsed().as_nanos() as i64;
+                                let cmtime = build_cmtime_ns(elapsed_ns);
+                                let _ = send_asyn_packet(&mut ep_out, clock_ref, MAGIC_TIME, &cmtime);
                             } else if sub_magic == MAGIC_FEED && payload.len() > 12 {
-                                process_feed_payload(
+                                let hint_is_audio = device_audio_clock_ref != 0
+                                    && clock_ref == device_audio_clock_ref
+                                    && clock_ref != device_video_clock_ref;
+                                let was_video = process_feed_payload(
                                     &payload[12..],
+                                    hint_is_audio,
                                     &mut nal_length_size,
                                     &mut synthetic_pts_us,
                                     frame_step_us,
                                     &shared,
                                 );
-                                let _ = send_asyn_packet(&mut ep_out, MAGIC_EAT, &[]);
+                                if was_video {
+                                    let target_ref = if device_video_clock_ref != 0 {
+                                        device_video_clock_ref
+                                    } else {
+                                        clock_ref
+                                    };
+                                    let _ = send_asyn_packet(&mut ep_out, target_ref, MAGIC_NEED, &[]);
+                                } else {
+                                    let _ = send_asyn_packet(&mut ep_out, clock_ref, MAGIC_EAT, &[]);
+                                }
                             }
                         }
                         MAGIC_FEED => {
-                            process_feed_payload(
+                            let was_video = process_feed_payload(
                                 &payload,
+                                false,
                                 &mut nal_length_size,
                                 &mut synthetic_pts_us,
                                 frame_step_us,
                                 &shared,
                             );
-                            let _ = send_asyn_packet(&mut ep_out, MAGIC_EAT, &[]);
+                            if was_video && device_video_clock_ref != 0 {
+                                let _ = send_asyn_packet(
+                                    &mut ep_out,
+                                    device_video_clock_ref,
+                                    MAGIC_NEED,
+                                    &[],
+                                );
+                            } else {
+                                let _ = send_asyn_packet(&mut ep_out, 0, MAGIC_EAT, &[]);
+                            }
                         }
                         _ => {}
                     }
@@ -914,16 +1098,26 @@ fn run_coremedia_loop(
         }
     }
 
+    // Cleanly unplug virtual display & audio devices so iOS exits screen recording mode
+    if plugged_virtual_devices {
+        let _ = send_asyn_packet(&mut ep_out, 0, MAGIC_HPD0, &[]);
+        if device_audio_clock_ref != 0 {
+            let _ = send_asyn_packet(&mut ep_out, device_audio_clock_ref, MAGIC_HPA0, &[]);
+        }
+    }
+
     shared.close(None);
 }
 
+/// Processes a CoreMedia `FEED` payload. Returns `true` if a video packet was emitted.
 fn process_feed_payload(
     payload: &[u8],
+    hint_is_audio: bool,
     nal_length_size: &mut usize,
     synthetic_pts_us: &mut u64,
     frame_step_us: u64,
     shared: &SharedQueue,
-) {
+) -> bool {
     let parsed = extract_sample_buffer(payload);
     let now = Instant::now();
     let pts_us = parsed.pts_us.unwrap_or_else(|| {
@@ -931,6 +1125,8 @@ fn process_feed_payload(
         *synthetic_pts_us = synthetic_pts_us.saturating_add(frame_step_us);
         p
     });
+
+    let mut emitted_video = false;
 
     if let Some(avcc) = parsed.avcc {
         if let Ok((config_annexb, nls)) = parse_avcc_config(avcc) {
@@ -943,11 +1139,13 @@ fn process_feed_payload(
                 payload: Arc::from(config_annexb),
                 received_at: now,
             });
+            emitted_video = true;
         }
     }
 
     if let Some(sdat) = parsed.sdat {
-        if parsed.is_audio && !parsed.is_video {
+        let is_audio = (parsed.is_audio || hint_is_audio) && !parsed.is_video;
+        if is_audio {
             if let Some(pcm) = parse_lpcm_48khz_audio(sdat) {
                 shared.push(NalPacket {
                     pts_us,
@@ -967,8 +1165,11 @@ fn process_feed_payload(
                 payload: Arc::from(annex_b),
                 received_at: now,
             });
+            emitted_video = true;
         }
     }
+
+    emitted_video
 }
 
 #[cfg(test)]
@@ -995,7 +1196,6 @@ mod tests {
         assert_eq!(frame.payload, b"cwpa_payload");
 
         let feed_bytes = build_coremedia_frame(MAGIC_FEED, &[0xAA, 0xBB]);
-        // Partial buffer returns Ok(None)
         assert!(parse_coremedia_frame(&feed_bytes[..7]).unwrap().is_none());
         assert!(parse_coremedia_frame(&feed_bytes[..9]).unwrap().is_none());
 
@@ -1009,11 +1209,9 @@ mod tests {
 
     #[test]
     fn test_coremedia_frame_rejects_invalid_lengths() {
-        // Length < 8
         let too_small = [4, 0, 0, 0, b'g', b'n', b'i', b'p'];
         assert!(parse_coremedia_frame(&too_small).is_err());
 
-        // Length > MAX_COREMEDIA_FRAME_LEN
         let mut too_large = Vec::new();
         too_large.extend_from_slice(&((MAX_COREMEDIA_FRAME_LEN as u32) + 1).to_le_bytes());
         too_large.extend_from_slice(&MAGIC_FEED.to_le_bytes());
@@ -1021,21 +1219,36 @@ mod tests {
     }
 
     #[test]
+    fn test_hpd1_hpa1_and_cmtime_atoms_well_formed() {
+        let hpd1 = build_hpd1_video_config_dict(60);
+        let (frame, consumed) = parse_coremedia_frame(&hpd1)
+            .expect("valid hpd1 dict")
+            .expect("complete hpd1 dict");
+        assert_eq!(consumed, hpd1.len());
+        assert_eq!(frame.magic, MAGIC_DICT);
+        assert!(hpd1.windows(11).any(|w| w == b"DisplaySize"));
+        assert!(hpd1.windows(6).any(|w| w == b"MaxFPS"));
+
+        let hpa1 = build_hpa1_audio_config_dict();
+        let (audio_frame, a_consumed) = parse_coremedia_frame(&hpa1)
+            .expect("valid hpa1 dict")
+            .expect("complete hpa1 dict");
+        assert_eq!(a_consumed, hpa1.len());
+        assert_eq!(audio_frame.magic, MAGIC_DICT);
+
+        let cmtime = build_cmtime_ns(1_500_000_000);
+        assert_eq!(parse_stia_pts_us(&cmtime), Some(1_500_000));
+    }
+
+    #[test]
     fn test_avcc_config_to_annexb_sps_pps() {
         let sps = [0x67, 0x64, 0x00, 0x1F, 0xAC, 0xD9];
         let pps = [0x68, 0xEE, 0x3C, 0x80];
 
-        let mut avcc = vec![
-            1,    // configurationVersion
-            0x64, // AVCProfileIndication
-            0x00, // profile_compatibility
-            0x1F, // AVCLevelIndication
-            0xFF, // lengthSizeMinusOne = 3 -> 4-byte NAL length
-            0xE1, // numOfSequenceParameterSets = 1
-        ];
+        let mut avcc = vec![1, 0x64, 0x00, 0x1F, 0xFF, 0xE1];
         avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
         avcc.extend_from_slice(&sps);
-        avcc.push(1); // numOfPictureParameterSets = 1
+        avcc.push(1);
         avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
         avcc.extend_from_slice(&pps);
 
@@ -1052,7 +1265,6 @@ mod tests {
 
     #[test]
     fn test_avcc_to_annexb_and_idr_detection() {
-        // Non-IDR slice (NAL type 1: 0x41 & 0x1F == 1)
         let non_idr = [0x41, 0x9A, 0x01];
         let mut sample_non_idr = Vec::new();
         sample_non_idr.extend_from_slice(&(non_idr.len() as u32).to_be_bytes());
@@ -1062,7 +1274,6 @@ mod tests {
         assert!(!is_keyframe);
         assert_eq!(out, [0, 0, 0, 1, 0x41, 0x9A, 0x01]);
 
-        // IDR slice (NAL type 5: 0x65 & 0x1F == 5) preceded by SEI (NAL type 6)
         let sei = [0x06, 0x05, 0x01];
         let idr = [0x65, 0x88, 0x84, 0x21];
         let mut sample_idr = Vec::new();
@@ -1093,14 +1304,5 @@ mod tests {
             product_name: "iPhone".to_string(),
         };
         assert_ne!(probe_none, probe_ready);
-
-        let header = StreamHeader {
-            codec_id: CODEC_ID_H264,
-            width: 0,
-            height: 0,
-            framed: true,
-        };
-        assert_eq!(header.codec_id, CODEC_ID_H264);
-        assert!(header.framed);
     }
 }

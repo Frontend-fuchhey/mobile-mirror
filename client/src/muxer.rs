@@ -282,8 +282,8 @@ impl NativeIsoMp4Muxer {
 
         Ok(Self {
             writer,
-            width,
-            height,
+            width: if width == 0 { 1920 } else { width },
+            height: if height == 0 { 1080 } else { height },
             sps: vec![0x67, 0x42, 0x00, 0x1f],
             pps: vec![0x68, 0xce, 0x3c, 0x80],
             latest_sps: vec![0x67, 0x42, 0x00, 0x1f],
@@ -300,6 +300,13 @@ impl NativeIsoMp4Muxer {
             samples: Vec::with_capacity(4096),
             audio_samples: Vec::with_capacity(4096),
         })
+    }
+
+    pub fn update_dimensions(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.width = width;
+            self.height = height;
+        }
     }
 
     pub fn write_packet(&mut self, packet: &NalPacket) -> io::Result<()> {

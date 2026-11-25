@@ -1,4 +1,4 @@
-name: Release Windows Installer
+name: Release Multi-Platform Installers
 
 on:
   push:
@@ -7,33 +7,40 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 1.0.0)"
+        description: "Release version (e.g. 1.1.0)"
         required: true
-        default: "1.0.0"
+        default: "1.1.0"
 
 permissions:
   contents: write
 
 jobs:
-  build-windows-installer:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Determine release version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+            VER="${VER#v}"
+            TAG="v${VER}"
+          else
+            TAG="${{ github.ref_name }}"
+            VER="${TAG#v}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: meta
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Determine release version
-        id: meta
-        shell: pwsh
-        run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $ver = "${{ inputs.version }}" -replace '^v', ''
-            $tag = "v$ver"
-          } else {
-            $tag = "${{ github.ref_name }}"
-            $ver = $tag -replace '^v', ''
-          }
-          echo "version=$ver" >> $env:GITHUB_OUTPUT
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -52,24 +59,251 @@ jobs:
       - name: Build MobileMirror-Setup.exe
         shell: pwsh
         run: |
-          .\build_installer.ps1 -Version "${{ steps.meta.outputs.version }}"
+          .\build_installer.ps1 -Version "${{ needs.meta.outputs.version }}"
 
-      - name: Upload installer artifact
+      - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MobileMirror-Setup
+          name: MobileMirror-Windows
           path: dist/MobileMirror-Setup.exe
 
+  build-macos:
+    needs: meta
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Install SDL3, FFmpeg, ADB, and dylibbundler via Homebrew
+        run: |
+          brew update
+          brew install sdl3 ffmpeg android-platform-tools dylibbundler
+
+      - name: Build release client binary
+        working-directory: client
+        run: cargo build --release
+
+      - name: Package Mobile Mirror.app and MobileMirror-macOS.dmg
+        run: |
+          set -euo pipefail
+          VER="${{ needs.meta.outputs.version }}"
+          APP="dist/dmg-root/Mobile Mirror.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/platform-tools"
+
+          cp client/target/release/mobile-mirror-client "$APP/Contents/MacOS/mobile-mirror-client"
+          chmod +x "$APP/Contents/MacOS/mobile-mirror-client"
+          cp server/server.jar "$APP/Contents/Resources/server.jar"
+
+          if command -v adb >/dev/null 2>&1; then
+            cp "$(command -v adb)" "$APP/Contents/Resources/platform-tools/adb"
+            chmod +x "$APP/Contents/Resources/platform-tools/adb"
+          fi
+
+          # Bundle SDL3 and FFmpeg dylibs
+          SDL3_PREFIX="$(brew --prefix sdl3)"
+          FFMPEG_PREFIX="$(brew --prefix ffmpeg)"
+          cp -RL "$SDL3_PREFIX"/lib/libSDL3*.dylib "$APP/Contents/Frameworks/" || true
+          cp -RL "$FFMPEG_PREFIX"/lib/libavcodec*.dylib "$APP/Contents/Frameworks/" || true
+          cp -RL "$FFMPEG_PREFIX"/lib/libavformat*.dylib "$APP/Contents/Frameworks/" || true
+          cp -RL "$FFMPEG_PREFIX"/lib/libavutil*.dylib "$APP/Contents/Frameworks/" || true
+          cp -RL "$FFMPEG_PREFIX"/lib/libswresample*.dylib "$APP/Contents/Frameworks/" || true
+
+          # Fix transitive Homebrew dylib paths inside Frameworks
+          for lib in "$APP"/Contents/Frameworks/*.dylib; do
+            chmod u+w "$lib" || true
+            dylibbundler -of -b -x "$lib" -d "$APP/Contents/Frameworks" -p "@loader_path/" || true
+          done
+
+          # Generate macOS .icns icon from app_icon.png
+          ICONSET="dist/AppIcon.iconset"
+          mkdir -p "$ICONSET"
+          for sz in 16 32 64 128 256 512; do
+            sips -z $sz $sz client/assets/app_icon.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+            sz2=$((sz * 2))
+            sips -z $sz2 $sz2 client/assets/app_icon.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Mobile Mirror</string>
+            <key>CFBundleDisplayName</key>
+            <string>Mobile Mirror</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.mobilemirror.desktop</string>
+            <key>CFBundleVersion</key>
+            <string>${VER}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VER}</string>
+            <key>CFBundleExecutable</key>
+            <string>mobile-mirror-client</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSLocalNetworkUsageDescription</key>
+            <string>Mobile Mirror advertises an AirPlay receiver on your local network so your iPhone or iPad can mirror wirelessly.</string>
+            <key>NSBonjourServices</key>
+            <array>
+              <string>_airplay._tcp</string>
+              <string>_raop._tcp</string>
+            </array>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --deep --sign - "$APP"
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname "Mobile Mirror" -srcfolder dist/dmg-root -ov -format UDZO dist/MobileMirror-macOS.dmg
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MobileMirror-macOS
+          path: dist/MobileMirror-macOS.dmg
+
+  build-linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Install Linux build & runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            libasound2-dev libpulse-dev libdbus-1-dev libudev-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+            android-tools-adb
+
+      - name: Build SDL3 shared library
+        run: |
+          git clone --depth 1 --branch release-3.2.8 https://github.com/libsdl-org/SDL.git /tmp/sdl3
+          cmake -S /tmp/sdl3 -B /tmp/sdl3-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_TEST_LIBRARY=OFF \
+            -DSDL_TESTS=OFF \
+            -DSDL_EXAMPLES=OFF
+          cmake --build /tmp/sdl3-build --parallel
+          sudo cmake --install /tmp/sdl3-build
+          sudo ldconfig
+
+      - name: Build release client binary
+        working-directory: client
+        run: cargo build --release
+
+      - name: Package MobileMirror-Linux-x86_64.tar.gz
+        run: |
+          set -euo pipefail
+          STAGE="dist/MobileMirror-Linux-x86_64"
+          mkdir -p "$STAGE/lib"
+
+          cp client/target/release/mobile-mirror-client "$STAGE/mobile-mirror-client"
+          chmod +x "$STAGE/mobile-mirror-client"
+          cp server/server.jar "$STAGE/server.jar"
+          cp client/assets/app_icon.png "$STAGE/app_icon.png"
+
+          # Bundle compiled SDL3 shared library
+          cp -L /usr/local/lib/libSDL3.so.0 "$STAGE/lib/libSDL3.so.0"
+          ln -sf libSDL3.so.0 "$STAGE/lib/libSDL3.so"
+
+          cat > "$STAGE/mobile-mirror.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/lib:${LD_LIBRARY_PATH:-}"
+          exec "$DIR/mobile-mirror-client" "$@"
+          EOF
+          chmod +x "$STAGE/mobile-mirror.sh"
+
+          cat > "$STAGE/install.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          INSTALL_DIR="${HOME}/.local/share/mobile-mirror"
+          mkdir -p "$INSTALL_DIR" "${HOME}/.local/share/applications" "${HOME}/.local/bin"
+          cp -r "$DIR/"* "$INSTALL_DIR/"
+          chmod +x "$INSTALL_DIR/mobile-mirror.sh" "$INSTALL_DIR/mobile-mirror-client"
+          ln -sf "$INSTALL_DIR/mobile-mirror.sh" "${HOME}/.local/bin/mobile-mirror"
+
+          cat > "${HOME}/.local/share/applications/mobile-mirror.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=Mobile Mirror
+          Comment=Android & iOS Screen Mirroring and Lossless MP4 Recorder
+          Exec=${INSTALL_DIR}/mobile-mirror.sh
+          Icon=${INSTALL_DIR}/app_icon.png
+          Terminal=false
+          Categories=Utility;AudioVideo;
+          DESKTOP
+
+          echo "Mobile Mirror installed to ${INSTALL_DIR}"
+          echo "Note: Ensure FFmpeg and ADB are installed (e.g. sudo apt install ffmpeg adb)."
+          EOF
+          chmod +x "$STAGE/install.sh"
+
+          tar -C dist -czf dist/MobileMirror-Linux-x86_64.tar.gz MobileMirror-Linux-x86_64
+
+      - name: Upload Linux tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MobileMirror-Linux
+          path: dist/MobileMirror-Linux-x86_64.tar.gz
+
+  publish-release:
+    needs: [meta, build-windows, build-macos, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = "${{ steps.meta.outputs.tag }}"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "dist/MobileMirror-Setup.exe" --clobber
-          } else {
-            gh release create $tag "dist/MobileMirror-Setup.exe" --title "Mobile Mirror $tag" --generate-notes
-          }
+          TAG="${{ needs.meta.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              artifacts/MobileMirror-Setup.exe \
+              artifacts/MobileMirror-macOS.dmg \
+              artifacts/MobileMirror-Linux-x86_64.tar.gz \
+              --clobber
+          else
+            gh release create "$TAG" \
+              artifacts/MobileMirror-Setup.exe \
+              artifacts/MobileMirror-macOS.dmg \
+              artifacts/MobileMirror-Linux-x86_64.tar.gz \
+              --title "Mobile Mirror ${TAG}" \
+              --generate-notes
+          fi

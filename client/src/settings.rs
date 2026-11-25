@@ -399,7 +399,11 @@ pub fn reveal_file_in_explorer(path: &Path) {
             .arg(format!("/select,{}", clean_str))
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").args(["-R", &clean_str]).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(p) = path.parent() {
             open_folder_in_explorer(p);

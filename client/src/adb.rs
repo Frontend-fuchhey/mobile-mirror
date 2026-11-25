@@ -996,13 +996,20 @@ fn kill_remote_server(adb_bin: &Path, serial: Option<&str>) {
 pub fn locate_adb_binary() -> Result<PathBuf, UsbCheckError> {
     let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
 
-    // 0. Prefer bundled `adb` next to the executable (zero-setup Windows installer layout)
+    // 0. Prefer bundled `adb` next to the executable (Windows installer, macOS .app, Linux bundle)
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             let bundled_candidates = [
                 exe_dir.join(exe_name),
                 exe_dir.join("platform-tools").join(exe_name),
                 exe_dir.join("adb").join(exe_name),
+                exe_dir.join("..").join("platform-tools").join(exe_name),
+                exe_dir.join("..").join("Resources").join(exe_name),
+                exe_dir
+                    .join("..")
+                    .join("Resources")
+                    .join("platform-tools")
+                    .join(exe_name),
             ];
             for candidate in bundled_candidates {
                 if candidate.is_file() {
@@ -1012,10 +1019,28 @@ pub fn locate_adb_binary() -> Result<PathBuf, UsbCheckError> {
         }
     }
 
-    // 1. Check `adb` on system PATH
+    // 1. Check `adb` on system PATH (and common Homebrew/Linux system bins for GUI launches)
     if let Ok(out) = new_hidden_command("adb").arg("version").output() {
         if out.status.success() {
             return Ok(PathBuf::from("adb"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for p in ["/opt/homebrew/bin/adb", "/usr/local/bin/adb"] {
+            let cand = PathBuf::from(p);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for p in ["/usr/bin/adb", "/usr/local/bin/adb"] {
+            let cand = PathBuf::from(p);
+            if cand.is_file() {
+                return Ok(cand);
+            }
         }
     }
 
@@ -1144,6 +1169,8 @@ pub fn locate_artifact_file(relative_path: &str) -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join(relative_path));
+            candidates.push(dir.join("..").join("Resources").join(relative_path));
+            candidates.push(dir.join("..").join("share").join("mobile-mirror").join(relative_path));
             candidates.push(dir.join("..").join(relative_path));
             candidates.push(dir.join("..").join("..").join(relative_path));
             candidates.push(dir.join("..").join("..").join("..").join(relative_path));

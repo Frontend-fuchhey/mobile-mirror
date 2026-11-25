@@ -177,14 +177,30 @@ impl UiCanvas {
             r"C:\Windows\Fonts\segoeui.ttf",
             r"C:\Windows\Fonts\arial.ttf",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         ]);
         let font_semibold = load_system_font(&[
             r"C:\Windows\Fonts\seguisb.ttf",
             r"C:\Windows\Fonts\segoeuib.ttf",
             r"C:\Windows\Fonts\arialbd.ttf",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
         ])
         .or_else(|| font_regular.clone());
         let font_bold = load_system_font(&[
@@ -192,7 +208,15 @@ impl UiCanvas {
             r"C:\Windows\Fonts\seguisb.ttf",
             r"C:\Windows\Fonts\arialbd.ttf",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
         ])
         .or_else(|| font_semibold.clone());
 

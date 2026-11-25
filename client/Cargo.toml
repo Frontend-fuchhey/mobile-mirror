@@ -12,13 +12,8 @@ link-system-libs = []
 [dependencies]
 ab_glyph = "0.2"
 nusb = "0.2"
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-aes = "0.8"
-ctr = "0.9"
-sha2 = "0.10"
-sha1 = "0.10"
-plist = "1.10"
+rust-airplay = "0.3.2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rand = "0.8"
 
 [[bin]]

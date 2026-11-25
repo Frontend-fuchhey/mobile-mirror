@@ -1,7 +1,8 @@
 use crate::ffi::ffmpeg::{
     FfmpegApi, AVBufferRef, AVCodec, AVFrame, AVPacket, AVERROR_EAGAIN, AVERROR_EOF,
     AV_CODEC_FLAG2_FAST, AV_CODEC_FLAG_LOW_DELAY, AV_CODEC_ID_H264, AV_HWDEVICE_TYPE_CUDA,
-    AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2, AV_PIX_FMT_CUDA, AV_PIX_FMT_D3D11,
+    AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2, AV_HWDEVICE_TYPE_VAAPI,
+    AV_HWDEVICE_TYPE_VDPAU, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, AV_PIX_FMT_CUDA, AV_PIX_FMT_D3D11,
     AV_PIX_FMT_DXVA2_VLD, AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P,
 };
 use crate::protocol::NalPacket;
@@ -82,25 +83,42 @@ impl HwDecoder {
                 }
 
                 if !force_software {
-                    let candidates: &[(i32, &str)] = match pref.as_str() {
-                        "d3d11va" | "d3d11" => &[
-                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
-                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
-                        ],
-                        "dxva2" => &[
-                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
-                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
-                        ],
-                        "nvdec" | "cuda" => &[
-                            (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
-                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
-                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
-                        ],
-                        _ => &[
-                            (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
-                            (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
-                            (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
-                        ],
+                    let candidates: &[(i32, &str)] = if cfg!(target_os = "macos") {
+                        &[(AV_HWDEVICE_TYPE_VIDEOTOOLBOX, "VideoToolbox")]
+                    } else if cfg!(target_os = "linux") {
+                        match pref.as_str() {
+                            "nvdec" | "cuda" => &[
+                                (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                                (AV_HWDEVICE_TYPE_VAAPI, "VA-API"),
+                                (AV_HWDEVICE_TYPE_VDPAU, "VDPAU"),
+                            ],
+                            _ => &[
+                                (AV_HWDEVICE_TYPE_VAAPI, "VA-API"),
+                                (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                                (AV_HWDEVICE_TYPE_VDPAU, "VDPAU"),
+                            ],
+                        }
+                    } else {
+                        match pref.as_str() {
+                            "d3d11va" | "d3d11" => &[
+                                (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                                (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                            ],
+                            "dxva2" => &[
+                                (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                                (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                            ],
+                            "nvdec" | "cuda" => &[
+                                (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                                (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                                (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                            ],
+                            _ => &[
+                                (AV_HWDEVICE_TYPE_D3D11VA, "D3D11VA"),
+                                (AV_HWDEVICE_TYPE_DXVA2, "DXVA2"),
+                                (AV_HWDEVICE_TYPE_CUDA, "NVDEC (CUDA)"),
+                            ],
+                        }
                     };
 
                     for &(hw_type, label) in candidates {

@@ -59,13 +59,29 @@ pub struct ClientConfig {
     pub max_packets: Option<u64>,
 }
 
+fn default_record_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join("Movies").join("MobileMirror");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join("Videos").join("MobileMirror");
+        }
+    }
+    PathBuf::from("recordings")
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:12345".to_string(),
             port: 12345,
             startup_mode: StartupMode::AutoUsb,
-            record_dir: PathBuf::from("recordings"),
+            record_dir: default_record_dir(),
             auto_record: false,
             enable_display: true,
             enable_mic: false,
@@ -693,6 +709,10 @@ enum RecorderCommand {
         cached_config: Option<Arc<NalPacket>>,
         cached_audio_config: Option<Arc<NalPacket>>,
     },
+    UpdateDimensions {
+        width: u32,
+        height: u32,
+    },
     Packet(Arc<NalPacket>),
     Stop,
     Quit,
@@ -780,6 +800,11 @@ fn run_playback_loop(
                                     e
                                 );
                             }
+                        }
+                    }
+                    RecorderCommand::UpdateDimensions { width, height } => {
+                        if let Some((ref mut muxer, _)) = active_muxer {
+                            muxer.update_dimensions(width, height);
                         }
                     }
                     RecorderCommand::Packet(pkt) => {
@@ -925,14 +950,18 @@ fn run_playback_loop(
                     if settings.quality != q {
                         settings.apply_quality_preset(q);
                         settings.save(record_dir);
-                        renderer.show_toast(format!(
-                            "Applying {} quality ({} Mbps)...",
-                            q.label(),
-                            settings.bitrate_mbps
-                        ));
-                        session_outcome = SessionOutcome::RestartForQualityChange;
-                        running.store(false, Ordering::SeqCst);
-                        break;
+                        if platform == DevicePlatform::IosAirPlay {
+                            renderer.show_toast("AirPlay quality & FPS are controlled by iOS");
+                        } else {
+                            renderer.show_toast(format!(
+                                "Applying {} quality ({} Mbps)...",
+                                q.label(),
+                                settings.bitrate_mbps
+                            ));
+                            session_outcome = SessionOutcome::RestartForQualityChange;
+                            running.store(false, Ordering::SeqCst);
+                            break;
+                        }
                     }
                 }
                 UiAction::SwitchTab(tab) => {
@@ -964,23 +993,35 @@ fn run_playback_loop(
                 UiAction::CycleFps => {
                     settings.cycle_fps();
                     settings.save(record_dir);
-                    session_outcome = SessionOutcome::RestartForQualityChange;
-                    running.store(false, Ordering::SeqCst);
-                    break;
+                    if platform == DevicePlatform::IosAirPlay {
+                        renderer.show_toast("AirPlay frame rate is controlled by iOS");
+                    } else {
+                        session_outcome = SessionOutcome::RestartForQualityChange;
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
                 }
                 UiAction::CycleBitrate => {
                     settings.cycle_bitrate();
                     settings.save(record_dir);
-                    session_outcome = SessionOutcome::RestartForQualityChange;
-                    running.store(false, Ordering::SeqCst);
-                    break;
+                    if platform == DevicePlatform::IosAirPlay {
+                        renderer.show_toast("AirPlay bitrate is controlled by iOS");
+                    } else {
+                        session_outcome = SessionOutcome::RestartForQualityChange;
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
                 }
                 UiAction::ToggleCbr => {
                     settings.cbr_mode = !settings.cbr_mode;
                     settings.save(record_dir);
-                    session_outcome = SessionOutcome::RestartForQualityChange;
-                    running.store(false, Ordering::SeqCst);
-                    break;
+                    if platform == DevicePlatform::IosAirPlay {
+                        renderer.show_toast("AirPlay bitrate mode is controlled by iOS");
+                    } else {
+                        session_outcome = SessionOutcome::RestartForQualityChange;
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
                 }
                 UiAction::TogglePcAudio => {
                     settings.pc_audio_enabled = !settings.pc_audio_enabled;
@@ -1148,8 +1189,13 @@ fn run_playback_loop(
                     if is_recording {
                         let _ = record_tx.try_send(RecorderCommand::Packet(Arc::clone(&packet)));
                     }
-                } else if let Some(ref mut player) = audio_player {
-                    player.play(&packet.payload);
+                } else {
+                    if is_recording && platform != DevicePlatform::AndroidUsb {
+                        let _ = record_tx.try_send(RecorderCommand::Packet(Arc::clone(&packet)));
+                    }
+                    if let Some(ref mut player) = audio_player {
+                        player.play(&packet.payload);
+                    }
                 }
             } else {
                 if packet.is_config {
@@ -1176,8 +1222,16 @@ fn run_playback_loop(
 
         if decoded_any_frame {
             decoder.with_current_frame(|frame_view| {
-                current_width = frame_view.width;
-                current_height = frame_view.height;
+                if frame_view.width != current_width || frame_view.height != current_height {
+                    current_width = frame_view.width;
+                    current_height = frame_view.height;
+                    if is_recording {
+                        let _ = record_tx.try_send(RecorderCommand::UpdateDimensions {
+                            width: current_width,
+                            height: current_height,
+                        });
+                    }
+                }
                 let _ = renderer.upload_video_frame(frame_view);
             });
         }

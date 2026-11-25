@@ -4,7 +4,16 @@ use crate::ffi::DynLib;
 use std::ffi::{c_char, c_int, c_void};
 
 pub const AV_CODEC_ID_H264: c_int = 27;
+pub const AV_CODEC_ID_AAC: c_int = 86018;
+pub const AV_CODEC_ID_ALAC: c_int = 86032;
 pub const AVMEDIA_TYPE_VIDEO: c_int = 0;
+pub const AVMEDIA_TYPE_AUDIO: c_int = 1;
+
+// Common Audio Sample Formats (AVSampleFormat)
+pub const AV_SAMPLE_FMT_S16: c_int = 1;
+pub const AV_SAMPLE_FMT_FLT: c_int = 3;
+pub const AV_SAMPLE_FMT_S16P: c_int = 6;
+pub const AV_SAMPLE_FMT_FLTP: c_int = 8;
 
 pub const AV_PKT_FLAG_KEY: c_int = 0x0001;
 pub const AVIO_FLAG_WRITE: c_int = 2;
@@ -31,6 +40,9 @@ pub const AV_PIX_FMT_DXVA2_VLD: c_int = 53;
 pub const AV_PIX_FMT_CUDA: c_int = 119;
 pub const AV_PIX_FMT_D3D11: c_int = 174;
 
+#[cfg(target_os = "macos")]
+pub const AVERROR_EAGAIN: c_int = -35;
+#[cfg(not(target_os = "macos"))]
 pub const AVERROR_EAGAIN: c_int = -11;
 pub const AVERROR_EOF: c_int = -((b'E' as c_int)
     | ((b'O' as c_int) << 8)
@@ -185,6 +197,8 @@ pub struct FfmpegApi {
     pub avcodec_free_context: unsafe extern "C" fn(*mut *mut c_void),
     pub avcodec_open2:
         unsafe extern "C" fn(*mut c_void, *const AVCodec, *mut *mut c_void) -> c_int,
+    pub avcodec_parameters_alloc: unsafe extern "C" fn() -> *mut AVCodecParameters,
+    pub avcodec_parameters_free: unsafe extern "C" fn(*mut *mut AVCodecParameters),
     pub avcodec_parameters_to_context:
         unsafe extern "C" fn(*mut c_void, *const AVCodecParameters) -> c_int,
     pub avcodec_send_packet: unsafe extern "C" fn(*mut c_void, *const AVPacket) -> c_int,
@@ -225,7 +239,13 @@ impl FfmpegApi {
             "libavutil.so.60",
             "libavutil.so.59",
             "libavutil.so.58",
+            "libavutil.so.57",
+            "libavutil.so.56",
             "libavutil.so",
+            "libavutil.61.dylib",
+            "libavutil.60.dylib",
+            "libavutil.59.dylib",
+            "libavutil.58.dylib",
             "libavutil.dylib",
         ])?;
         let avcodec = DynLib::open_any(&[
@@ -238,7 +258,13 @@ impl FfmpegApi {
             "libavcodec.so.62",
             "libavcodec.so.61",
             "libavcodec.so.60",
+            "libavcodec.so.59",
+            "libavcodec.so.58",
             "libavcodec.so",
+            "libavcodec.63.dylib",
+            "libavcodec.62.dylib",
+            "libavcodec.61.dylib",
+            "libavcodec.60.dylib",
             "libavcodec.dylib",
         ])?;
         let avformat = DynLib::open_any(&[
@@ -251,7 +277,13 @@ impl FfmpegApi {
             "libavformat.so.62",
             "libavformat.so.61",
             "libavformat.so.60",
+            "libavformat.so.59",
+            "libavformat.so.58",
             "libavformat.so",
+            "libavformat.63.dylib",
+            "libavformat.62.dylib",
+            "libavformat.61.dylib",
+            "libavformat.60.dylib",
             "libavformat.dylib",
         ])?;
 
@@ -277,6 +309,8 @@ impl FfmpegApi {
                 avcodec_alloc_context3: avcodec.get_sym("avcodec_alloc_context3")?,
                 avcodec_free_context: avcodec.get_sym("avcodec_free_context")?,
                 avcodec_open2: avcodec.get_sym("avcodec_open2")?,
+                avcodec_parameters_alloc: avcodec.get_sym("avcodec_parameters_alloc")?,
+                avcodec_parameters_free: avcodec.get_sym("avcodec_parameters_free")?,
                 avcodec_parameters_to_context: avcodec.get_sym("avcodec_parameters_to_context")?,
                 avcodec_send_packet: avcodec.get_sym("avcodec_send_packet")?,
                 avcodec_receive_frame: avcodec.get_sym("avcodec_receive_frame")?,
