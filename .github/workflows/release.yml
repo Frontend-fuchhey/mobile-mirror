@@ -35,6 +35,28 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+  build-server:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17 (for Android server.jar)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build Android server.jar
+        run: bash server/build.sh
+
+      - name: Upload server.jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-Server-Jar
+          path: server/server.jar
+
   build-windows:
     needs: meta
     runs-on: windows-latest
@@ -68,11 +90,17 @@ jobs:
           path: dist/MobileMirror-Setup.exe
 
   build-macos:
-    needs: meta
+    needs: [meta, build-server]
     runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download Android server.jar
+        uses: actions/download-artifact@v4
+        with:
+          name: Android-Server-Jar
+          path: server
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -178,11 +206,17 @@ jobs:
           path: dist/MobileMirror-macOS.dmg
 
   build-linux:
-    needs: meta
+    needs: [meta, build-server]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download Android server.jar
+        uses: actions/download-artifact@v4
+        with:
+          name: Android-Server-Jar
+          path: server
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
