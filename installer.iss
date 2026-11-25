@@ -2,7 +2,7 @@
 ; Compiles dist\stage\* into a single portable installer: dist\MobileMirror-Setup.exe
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 
 #ifndef StageDir
@@ -27,6 +27,12 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 AppUpdatesURL={#AppURL}/releases
+AppCopyright=Copyright (C) 2026 Mobile Mirror Contributors
+VersionInfoVersion={#AppVersion}.0
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName} Setup Installer
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion={#AppVersion}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -38,11 +44,16 @@ OutputDir={#OutputDir}
 OutputBaseFilename=MobileMirror-Setup
 SetupIconFile=client\assets\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
+UninstallDisplayName={#AppName}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
+#ifdef SignToolCmd
+SignTool=mysigntool
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath Foundation Artifact Configuration for Mobile Mirror
+  Paste this into SignPath Dashboard -> Projects -> mobile-mirror -> Artifact Configurations (slug: exe-installer)
+-->
+<artifact-configuration xmlns="http://schema.signpath.io/artifact-configuration/v1">
+  <pe-file path="MobileMirror-Setup.exe" />
+</artifact-configuration>
