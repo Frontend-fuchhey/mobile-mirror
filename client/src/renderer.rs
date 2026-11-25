@@ -16,11 +16,10 @@ use crate::settings::{
 };
 use crate::ui_canvas::{
     FontWeight, Rgb, UiCanvas, APPLE_BLUE, APPLE_BLUE_HOVER, APPLE_BLUE_SOFT, BADGE_OFF_BG,
-    BANNER_USB_BG, BANNER_USB_BORDER, BG_ALABASTER, BG_HEADER, BG_SIDEBAR, BLUE_GRAD_BOT,
-    BLUE_GRAD_HOVER_BOT, BLUE_GRAD_HOVER_TOP, BLUE_GRAD_TOP, BORDER_SUBTLE, CARD_BORDER,
-    CARD_WHITE, ERROR_BG, ERROR_BG_HOVER, ERROR_RED, LIVE_GREEN, PILL_NEUTRAL,
-    PILL_NEUTRAL_HOVER, SHADOW_SLATE, TEXT_BODY, TEXT_PRIMARY, TEXT_SECONDARY, WARNING_AMBER,
-    WARNING_AMBER_SOFT,
+    BANNER_USB_BG, BANNER_USB_BORDER, BG_HEADER, BG_SIDEBAR, BLUE_GRAD_HOVER_TOP,
+    BORDER_SUBTLE, CARD_BORDER, CARD_WHITE, ERROR_BG, ERROR_BG_HOVER, ERROR_RED, LIVE_GREEN,
+    PILL_NEUTRAL, PILL_NEUTRAL_HOVER, SHADOW_SLATE, TEXT_BODY, TEXT_PRIMARY, TEXT_SECONDARY,
+    WARNING_AMBER,
 };
 use std::ffi::{c_void, CStr, CString};
 use std::io;
@@ -30,7 +29,14 @@ use std::ptr;
 pub const DASHBOARD_WIDTH: u32 = 1120;
 pub const DASHBOARD_HEIGHT: u32 = 740;
 pub const TOOLBAR_HEIGHT: u32 = 44;
-pub const HEADER_BAR_HEIGHT: f32 = 54.0;
+pub const HEADER_BAR_HEIGHT: f32 = 48.0;
+
+/// Sub-sections inside the Settings view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Preferences,
+    HelpAbout,
+}
 
 /// Interactive UI actions emitted when the user clicks dashboard controls or presses hotkeys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +47,8 @@ pub enum UiAction {
     ToggleMic,
     SelectQuality(MirrorQuality),
     SwitchTab(NavTab),
+    SwitchSettingsSection(SettingsSection),
+    OpenHelpInSettings,
     OpenRecordingsFolder,
     PlayRecording(PathBuf),
     RevealRecording(PathBuf),
@@ -50,6 +58,7 @@ pub enum UiAction {
     ToggleCbr,
     TogglePcAudio,
     ToggleAutoConnect,
+    ToggleAirPlay,
     ToggleAutoRecord,
     ToggleAlwaysOnTop,
     CycleHwBackend,
@@ -58,6 +67,8 @@ pub enum UiAction {
     ResetDefaultSettings,
     MinimizeWindow,
     MaximizeRestoreWindow,
+    PrevRecordingsPage,
+    NextRecordingsPage,
     Quit,
 }
 
@@ -68,6 +79,7 @@ struct HitZone {
 }
 
 /// Complete state snapshot passed to the Bento Dashboard renderer each frame.
+#[derive(Debug, Clone, Copy)]
 pub struct DashboardViewState<'a> {
     pub active_tab: NavTab,
     pub settings: &'a AppSettings,
@@ -77,6 +89,8 @@ pub struct DashboardViewState<'a> {
     pub is_warning: bool,
     pub is_mirroring: bool,
     pub device_serial: Option<&'a str>,
+    pub platform_label: Option<&'a str>,
+    pub airplay_listening: bool,
     pub is_recording: bool,
     pub rec_elapsed_secs: u64,
     pub last_saved_recording: Option<&'a str>,
@@ -85,6 +99,14 @@ pub struct DashboardViewState<'a> {
     pub fps: u32,
     pub recordings: &'a [RecordingEntry],
     pub status_toast: Option<&'a str>,
+    pub thumbnails: Option<&'a std::collections::HashMap<PathBuf, crate::thumbnail::VideoThumbnail>>,
+    pub recordings_page: usize,
+}
+
+impl<'a> DashboardViewState<'a> {
+    pub fn thumbnail_for(&self, path: &Path) -> Option<&crate::thumbnail::VideoThumbnail> {
+        self.thumbnails.and_then(|map| map.get(path))
+    }
 }
 
 struct HitTestContext {
@@ -106,6 +128,7 @@ struct UiCacheKey {
     is_full_video: bool,
     is_window_fullscreen: bool,
     active_tab: NavTab,
+    settings_section: SettingsSection,
     is_mirroring: bool,
     is_connecting: bool,
     is_warning: bool,
@@ -119,9 +142,12 @@ struct UiCacheKey {
     headline: String,
     subtext: String,
     device_serial: Option<String>,
+    platform_label: Option<String>,
+    airplay_listening: bool,
     last_saved_recording: Option<String>,
     status_toast: Option<String>,
     recordings_len: usize,
+    recordings_page: usize,
     anim_bucket: u32,
 }
 
@@ -233,9 +259,12 @@ pub struct Sdl3Renderer {
     last_record_toggle: std::time::Instant,
     last_mic_toggle: std::time::Instant,
     pub active_tab: NavTab,
+    pub settings_section: SettingsSection,
     pub cached_recordings: Vec<RecordingEntry>,
     last_recordings_scan: std::time::Instant,
     pub status_toast: Option<(String, std::time::Instant)>,
+    pub recordings_page: usize,
+    pub thumbnail_cache: std::collections::HashMap<PathBuf, crate::thumbnail::VideoThumbnail>,
     in_compact_phone_mode: bool,
     is_window_fullscreen: bool,
     applied_video_w: u32,
@@ -273,6 +302,26 @@ impl Sdl3Renderer {
 
             if let Some(set_bordered) = api.sdl_set_window_bordered {
                 let _ = set_bordered(window, false);
+            }
+
+            // Set native window & taskbar icon ("Glossy Laptop Mirroring App Icon")
+            if let (Some(create_surf), Some(set_icon), Some(destroy_surf)) = (
+                api.sdl_create_surface_from,
+                api.sdl_set_window_icon,
+                api.sdl_destroy_surface,
+            ) {
+                let mut icon_argb = crate::ui_canvas::app_icon_argb_256();
+                let surf = create_surf(
+                    256,
+                    256,
+                    SDL_PIXELFORMAT_ARGB8888,
+                    icon_argb.as_mut_ptr() as *mut std::ffi::c_void,
+                    256 * 4,
+                );
+                if !surf.is_null() {
+                    let _ = set_icon(window, surf);
+                    destroy_surf(surf);
+                }
             }
 
             let hit_test_ctx = Box::into_raw(Box::new(HitTestContext {
@@ -329,11 +378,14 @@ impl Sdl3Renderer {
                     .checked_sub(std::time::Duration::from_secs(2))
                     .unwrap_or_else(std::time::Instant::now),
                 active_tab: NavTab::Home,
+                settings_section: SettingsSection::Preferences,
                 cached_recordings: Vec::new(),
                 last_recordings_scan: std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(10))
                     .unwrap_or_else(std::time::Instant::now),
                 status_toast: None,
+                recordings_page: 0,
+                thumbnail_cache: std::collections::HashMap::new(),
                 in_compact_phone_mode: false,
                 is_window_fullscreen: false,
                 applied_video_w: 0,
@@ -503,6 +555,18 @@ impl Sdl3Renderer {
         if force || self.last_recordings_scan.elapsed() >= std::time::Duration::from_secs(2) {
             self.cached_recordings = scan_recordings(record_dir);
             self.last_recordings_scan = std::time::Instant::now();
+            self.thumbnail_cache.retain(|p, _| p.exists());
+            if self.active_tab == NavTab::Recordings {
+                for rec in &self.cached_recordings {
+                    if !self.thumbnail_cache.contains_key(&rec.full_path) {
+                        if let Some(thumb) =
+                            crate::thumbnail::extract_video_thumbnail(&rec.full_path, 240, 136)
+                        {
+                            self.thumbnail_cache.insert(rec.full_path.clone(), thumb);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -711,6 +775,22 @@ impl Sdl3Renderer {
                     // Check hit zones in reverse draw order (top-most control wins)
                     for zone in self.hit_zones.iter().rev() {
                         if point_in_rect(mx, my, &zone.rect) {
+                            match &zone.action {
+                                UiAction::PrevRecordingsPage => {
+                                    self.recordings_page = self.recordings_page.saturating_sub(1);
+                                }
+                                UiAction::NextRecordingsPage => {
+                                    self.recordings_page = self.recordings_page.saturating_add(1);
+                                }
+                                UiAction::SwitchSettingsSection(sec) => {
+                                    self.settings_section = *sec;
+                                }
+                                UiAction::OpenHelpInSettings => {
+                                    self.active_tab = NavTab::Settings;
+                                    self.settings_section = SettingsSection::HelpAbout;
+                                }
+                                _ => {}
+                            }
                             actions.push(zone.action.clone());
                             break;
                         }
@@ -778,6 +858,7 @@ impl Sdl3Renderer {
             is_full_video,
             is_window_fullscreen: is_win_fs,
             active_tab: state.active_tab,
+            settings_section: self.settings_section,
             is_mirroring: state.is_mirroring,
             is_connecting: state.is_connecting,
             is_warning: state.is_warning,
@@ -795,11 +876,20 @@ impl Sdl3Renderer {
             headline: state.headline.to_string(),
             subtext: state.subtext.to_string(),
             device_serial: state.device_serial.map(str::to_string),
+            platform_label: state.platform_label.map(str::to_string),
+            airplay_listening: state.airplay_listening,
             last_saved_recording: state.last_saved_recording.map(str::to_string),
             status_toast: state.status_toast.map(str::to_string),
             recordings_len: state.recordings.len(),
+            recordings_page: self.recordings_page,
             anim_bucket,
         };
+
+        let mut enriched_state = *state;
+        if enriched_state.thumbnails.is_none() {
+            enriched_state.thumbnails = Some(&self.thumbnail_cache);
+        }
+        enriched_state.recordings_page = self.recordings_page;
 
         let needs_ui_redraw =
             self.ui_texture.is_null() || self.last_ui_cache_key.as_ref() != Some(&current_key);
@@ -838,7 +928,8 @@ impl Sdl3Renderer {
                     &mut self.hit_zones,
                     mx,
                     my,
-                    state,
+                    &enriched_state,
+                    self.settings_section,
                 );
             }
             self.upload_ui_canvas_texture();
@@ -1030,6 +1121,8 @@ impl Sdl3Renderer {
             is_warning,
             is_mirroring: false,
             device_serial: None,
+            platform_label: None,
+            airplay_listening: false,
             is_recording: false,
             rec_elapsed_secs: 0,
             last_saved_recording: None,
@@ -1038,6 +1131,8 @@ impl Sdl3Renderer {
             fps: 60,
             recordings: &recs,
             status_toast: None,
+            thumbnails: None,
+            recordings_page: 0,
         };
         self.render_dashboard(&state);
     }
@@ -1079,6 +1174,8 @@ impl Sdl3Renderer {
             is_warning: false,
             is_mirroring: true,
             device_serial: None,
+            platform_label: None,
+            airplay_listening: false,
             is_recording,
             rec_elapsed_secs,
             last_saved_recording: None,
@@ -1087,6 +1184,8 @@ impl Sdl3Renderer {
             fps,
             recordings: &recs,
             status_toast: None,
+            thumbnails: None,
+            recordings_page: 0,
         };
         self.render_dashboard(&state);
         Ok(())
@@ -1111,6 +1210,8 @@ impl Sdl3Renderer {
             is_warning: false,
             is_mirroring: !self.texture.is_null(),
             device_serial: None,
+            platform_label: None,
+            airplay_listening: false,
             is_recording,
             rec_elapsed_secs,
             last_saved_recording: None,
@@ -1119,6 +1220,8 @@ impl Sdl3Renderer {
             fps,
             recordings: &recs,
             status_toast: None,
+            thumbnails: None,
+            recordings_page: 0,
         };
         self.render_dashboard(&state);
         Ok(())
@@ -1208,15 +1311,23 @@ fn draw_bento_dashboard_canvas(
     mx: f32,
     my: f32,
     state: &DashboardViewState<'_>,
+    settings_section: SettingsSection,
 ) -> Option<SDL_FRect> {
     let win_w = canvas.logical_width;
     let win_h = canvas.logical_height;
 
-    // 1. Main Workspace Cool-Tinted Alabaster Background (#F3F6FD)
-    canvas.clear(BG_ALABASTER);
+    // 1. Subtle Light-Blue Outer Workspace Surface (#F4F7FC)
+    canvas.clear(BG_SIDEBAR);
 
-    // 2. Left Sidebar Surface (x = 0..192, y = 54..win_h)
-    let sidebar_w = 192.0;
+    // 2. Responsive Left Sidebar
+    let compact_sidebar = win_w < 740.0;
+    let sidebar_w = if compact_sidebar {
+        58.0
+    } else if win_w < 960.0 {
+        156.0
+    } else {
+        184.0
+    };
     canvas.fill_rect(
         0,
         HEADER_BAR_HEIGHT as i32,
@@ -1224,39 +1335,49 @@ fn draw_bento_dashboard_canvas(
         (win_h - HEADER_BAR_HEIGHT) as i32,
         BG_SIDEBAR,
     );
-    // Crisp 1px vertical divider between sidebar and main workspace
-    canvas.fill_rect(
-        sidebar_w as i32,
-        HEADER_BAR_HEIGHT as i32,
-        1,
-        (win_h - HEADER_BAR_HEIGHT) as i32,
-        BORDER_SUBTLE,
-    );
 
-    // 3. Top Application Header Bar (y = 0..54)
+    // 3. Top Application Header Bar (y = 0..HEADER_BAR_HEIGHT)
     canvas.fill_rect(0, 0, win_w as i32, HEADER_BAR_HEIGHT as i32, BG_HEADER);
     canvas.fill_rect(0, HEADER_BAR_HEIGHT as i32 - 1, win_w as i32, 1, BORDER_SUBTLE);
 
     // Top-left Brand Icon + "Mobile Mirror" title
-    canvas.draw_app_brand_icon(24.0, 12.0, 30.0);
-    let hdr_cap = canvas.cap_height(16.0, FontWeight::Bold);
+    canvas.draw_app_brand_icon(16.0, 11.0, 26.0);
+    let hdr_cap = canvas.cap_height(14.5, FontWeight::Semibold);
     canvas.draw_text_baseline(
         "Mobile Mirror",
-        66.0,
+        50.0,
         (HEADER_BAR_HEIGHT + hdr_cap) * 0.5,
-        16.0,
-        FontWeight::Bold,
+        14.5,
+        FontWeight::Semibold,
         TEXT_PRIMARY,
         1.0,
     );
 
-    // Top-right Window Controls (—  □  ✕) matching reference screenshot
-    let wc_y = 11.0;
+    if let Some(plat) = state.platform_label {
+        if win_w >= 600.0 {
+            let pw = (canvas.measure_text_width(plat, 11.5, FontWeight::Semibold) + 18.0).max(64.0);
+            let pill_rect = SDL_FRect {
+                x: 158.0,
+                y: (HEADER_BAR_HEIGHT - 22.0) * 0.5,
+                w: pw,
+                h: 22.0,
+            };
+            let (p_bg, p_fg) = if state.is_mirroring {
+                (Rgb(232, 249, 238), LIVE_GREEN)
+            } else {
+                (APPLE_BLUE_SOFT, APPLE_BLUE)
+            };
+            draw_small_pill(canvas, &pill_rect, plat, p_bg, p_fg);
+        }
+    }
+
+    // Top-right Windows 11 Window Controls (—  □  ✕)
+    let wc_y = 8.0;
     let wc_w = 36.0;
     let wc_h = 32.0;
-    let close_x = win_w - 48.0;
-    let max_x = close_x - 42.0;
-    let min_x = max_x - 42.0;
+    let close_x = win_w - 44.0;
+    let max_x = close_x - 40.0;
+    let min_x = max_x - 40.0;
 
     let min_rect = SDL_FRect {
         x: min_x,
@@ -1277,99 +1398,62 @@ fn draw_bento_dashboard_canvas(
         h: wc_h,
     };
 
-    if point_in_rect(mx, my, &min_rect) {
-        canvas.draw_rounded_card(
-            min_rect.x,
-            min_rect.y,
-            min_rect.w,
-            min_rect.h,
-            8.0,
-            PILL_NEUTRAL_HOVER,
-            PILL_NEUTRAL_HOVER,
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-    }
-    if point_in_rect(mx, my, &max_rect) {
-        canvas.draw_rounded_card(
-            max_rect.x,
-            max_rect.y,
-            max_rect.w,
-            max_rect.h,
-            8.0,
-            PILL_NEUTRAL_HOVER,
-            PILL_NEUTRAL_HOVER,
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-    }
-    let close_hover = point_in_rect(mx, my, &close_rect);
-    if close_hover {
-        canvas.draw_rounded_card(
-            close_rect.x,
-            close_rect.y,
-            close_rect.w,
-            close_rect.h,
-            8.0,
-            ERROR_BG_HOVER,
-            ERROR_BG_HOVER,
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
+    for r in [&min_rect, &max_rect, &close_rect] {
+        if point_in_rect(mx, my, r) {
+            canvas.draw_rounded_card(
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                6.0,
+                PILL_NEUTRAL_HOVER,
+                PILL_NEUTRAL_HOVER,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+        }
     }
 
     let wc_cy = HEADER_BAR_HEIGHT * 0.5;
-    // Minimize `—`
     canvas.draw_capsule_line(
         min_x + 12.0,
         wc_cy,
         min_x + 24.0,
         wc_cy,
-        1.8,
+        1.6,
         TEXT_PRIMARY,
         0.88,
     );
-    // Maximize `□`
     canvas.draw_rounded_stroke(
-        max_x + 12.0,
-        wc_cy - 5.5,
-        11.0,
-        11.0,
-        2.0,
-        1.7,
+        max_x + 12.5,
+        wc_cy - 5.0,
+        10.0,
+        10.0,
+        1.5,
+        1.5,
         TEXT_PRIMARY,
         0.88,
     );
-    // Close `✕`
-    let close_col = if close_hover { ERROR_RED } else { TEXT_PRIMARY };
     canvas.draw_capsule_line(
         close_x + 13.0,
-        wc_cy - 5.0,
-        close_x + 23.0,
-        wc_cy + 5.0,
-        1.8,
-        close_col,
+        wc_cy - 4.5,
+        close_x + 22.0,
+        wc_cy + 4.5,
+        1.6,
+        TEXT_PRIMARY,
         0.9,
     );
     canvas.draw_capsule_line(
-        close_x + 23.0,
-        wc_cy - 5.0,
+        close_x + 22.0,
+        wc_cy - 4.5,
         close_x + 13.0,
-        wc_cy + 5.0,
-        1.8,
-        close_col,
+        wc_cy + 4.5,
+        1.6,
+        TEXT_PRIMARY,
         0.9,
     );
 
@@ -1386,19 +1470,18 @@ fn draw_bento_dashboard_canvas(
         action: UiAction::Quit,
     });
 
-    // 4. Left Sidebar Navigation Items (Home, Recordings, Settings, About)
+    // 4. Left Sidebar Navigation Items (Home, Recordings, Settings)
     let nav_items = [
-        (NavTab::Home, "Home", 82.0, 50.0),
-        (NavTab::Recordings, "Recordings", 142.0, 46.0),
-        (NavTab::Settings, "Settings", 198.0, 46.0),
-        (NavTab::About, "About", 254.0, 46.0),
+        (NavTab::Home, "Home", 64.0, 40.0),
+        (NavTab::Recordings, "Recordings", 110.0, 40.0),
+        (NavTab::Settings, "Settings", 156.0, 40.0),
     ];
 
     for (tab, label, ny, nh) in nav_items {
         let nav_rect = SDL_FRect {
-            x: 12.0,
+            x: 8.0,
             y: ny,
-            w: sidebar_w - 24.0,
+            w: sidebar_w - 16.0,
             h: nh,
         };
         let is_active = state.active_tab == tab;
@@ -1415,9 +1498,24 @@ fn draw_bento_dashboard_canvas(
                 nav_rect.y,
                 nav_rect.w,
                 nav_rect.h,
-                13.0,
+                8.0,
                 bg,
                 bg,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+            canvas.draw_rounded_card(
+                nav_rect.x + 2.0,
+                nav_rect.y + 10.0,
+                3.0,
+                nav_rect.h - 20.0,
+                1.5,
+                APPLE_BLUE,
+                APPLE_BLUE,
                 0.0,
                 SHADOW_SLATE,
                 0.0,
@@ -1431,7 +1529,7 @@ fn draw_bento_dashboard_canvas(
                 nav_rect.y,
                 nav_rect.w,
                 nav_rect.h,
-                12.0,
+                8.0,
                 PILL_NEUTRAL_HOVER,
                 PILL_NEUTRAL_HOVER,
                 0.0,
@@ -1443,7 +1541,11 @@ fn draw_bento_dashboard_canvas(
             );
         }
 
-        let icon_cx = 38.0;
+        let icon_cx = if compact_sidebar {
+            sidebar_w * 0.5
+        } else {
+            28.0
+        };
         let icon_cy = ny + nh * 0.5;
         let fg = if is_active { APPLE_BLUE } else { TEXT_BODY };
         let weight = if is_active {
@@ -1464,21 +1566,22 @@ fn draw_bento_dashboard_canvas(
             NavTab::Home => canvas.draw_home_icon(icon_cx, icon_cy, inner_bg, fg, 1.0),
             NavTab::Recordings => canvas.draw_video_cam_icon(icon_cx, icon_cy, fg, 1.0),
             NavTab::Settings => {
-                canvas.draw_gear_icon(icon_cx, icon_cy, 8.6, inner_bg, fg, 1.0);
+                canvas.draw_gear_icon(icon_cx, icon_cy, 8.0, inner_bg, fg, 1.0);
             }
-            NavTab::About => canvas.draw_info_circle_icon(icon_cx, icon_cy, fg, 1.0),
         }
 
-        let cap = canvas.cap_height(14.5, weight);
-        canvas.draw_text_baseline(
-            label,
-            64.0,
-            icon_cy + cap * 0.5,
-            14.5,
-            weight,
-            fg,
-            1.0,
-        );
+        if !compact_sidebar {
+            let cap = canvas.cap_height(13.8, weight);
+            canvas.draw_text_baseline(
+                label,
+                48.0,
+                icon_cy + cap * 0.5,
+                13.8,
+                weight,
+                fg,
+                1.0,
+            );
+        }
 
         hit_zones.push(HitZone {
             rect: nav_rect,
@@ -1486,93 +1589,66 @@ fn draw_bento_dashboard_canvas(
         });
     }
 
-    // 5. Bottom-Left Status Card ("Ready" / "Waiting for device...")
-    let status_card_w = sidebar_w - 24.0;
-    let status_card_h = 84.0;
-    let status_card_y = (win_h - status_card_h - 20.0).max(320.0);
-    canvas.draw_rounded_card(
-        12.0,
-        status_card_y,
-        status_card_w,
-        status_card_h,
-        14.0,
-        CARD_WHITE,
-        CARD_BORDER,
-        1.0,
-        SHADOW_SLATE,
-        0.04,
-        12.0,
-        3.0,
-        1.0,
-    );
+    // 5. Fully Responsive Center + Right Column Layout
+    let pad = if win_w < 800.0 { 10.0 } else { 16.0 };
+    let right_col_w = (win_w * 0.24).clamp(200.0, 272.0);
+    let avail_three_col_center = win_w - sidebar_w - right_col_w - pad * 3.0;
+    let top_y = HEADER_BAR_HEIGHT + pad;
+    let total_h = (win_h - top_y - pad).max(200.0);
 
-    let (dot_col, status_title, status_sub) = if state.is_mirroring {
-        let res = format!("{}×{} • {}fps", state.stream_width, state.stream_height, state.fps);
-        (LIVE_GREEN, "Live", res)
-    } else if state.is_connecting {
-        (APPLE_BLUE, "Connecting", "Starting USB stream...".to_string())
-    } else if state.is_warning {
-        (WARNING_AMBER, "Action Needed", "Check phone screen".to_string())
-    } else if let Some(serial) = state.device_serial {
-        (LIVE_GREEN, "Ready", format!("USB: {}", serial))
+    let (center_x, center_y, center_w, center_h) = if avail_three_col_center >= 280.0 {
+        let right_col_x = win_w - right_col_w - pad;
+        draw_right_column_cards(
+            canvas,
+            hit_zones,
+            mx,
+            my,
+            right_col_x,
+            right_col_w,
+            top_y,
+            total_h,
+            state,
+        );
+        (
+            sidebar_w + pad,
+            top_y,
+            (right_col_x - pad - (sidebar_w + pad)).max(240.0),
+            total_h,
+        )
     } else {
-        (LIVE_GREEN, "Ready", "Waiting for device...".to_string())
+        // Ultra-narrow window fallback: stack right cards below center card so nothing overlaps
+        let right_h = 156.0_f32.min(total_h * 0.36);
+        let c_w = (win_w - sidebar_w - pad * 2.0).max(220.0);
+        let c_h = (total_h - right_h - pad).max(160.0);
+        let stack_y = top_y + c_h + pad;
+        draw_right_column_cards(
+            canvas,
+            hit_zones,
+            mx,
+            my,
+            sidebar_w + pad,
+            c_w,
+            stack_y,
+            right_h,
+            state,
+        );
+        (sidebar_w + pad, top_y, c_w, c_h)
     };
 
-    let dot_cx = 30.0;
-    let dot_cy = status_card_y + 27.0;
-    canvas.draw_circle(dot_cx, dot_cy, 5.2, dot_col, 1.0);
-    let st_cap = canvas.cap_height(14.2, FontWeight::Bold);
-    canvas.draw_text_baseline(
-        status_title,
-        43.0,
-        dot_cy + st_cap * 0.5,
-        14.2,
-        FontWeight::Bold,
-        dot_col,
-        1.0,
-    );
-
-    let fitted_sub = canvas.fit_text_to_width(
-        &status_sub,
-        status_card_w - 22.0,
-        12.2,
-        FontWeight::Regular,
-    );
-    canvas.draw_text(
-        &fitted_sub,
-        22.0,
-        status_card_y + 48.0,
-        12.2,
-        FontWeight::Regular,
-        TEXT_SECONDARY,
-        1.0,
-    );
-
-    // 6. Right Column — 3 Stacked Functional Cards (Recording, Mirror Quality, Quick Tools)
-    let right_col_w = 276.0;
-    let right_col_x = (win_w - right_col_w - 22.0).max(540.0);
-    draw_right_column_cards(canvas, hit_zones, mx, my, right_col_x, right_col_w, state);
-
-    // 7. Center Main Card (x = sidebar_w + 18 .. right_col_x - 18, y = 72 .. win_h - 22)
-    let center_x = sidebar_w + 18.0;
-    let center_y = 72.0;
-    let center_w = (right_col_x - 18.0 - center_x).max(340.0);
-    let center_h = (win_h - 22.0 - center_y).max(380.0);
-
+    // Clean White Center Card Surface
     canvas.draw_rounded_card(
         center_x,
         center_y,
         center_w,
         center_h,
-        22.0,
+        14.0,
         CARD_WHITE,
         CARD_BORDER,
         1.0,
         SHADOW_SLATE,
-        0.055,
-        20.0,
-        6.0,
+        0.0,
+        0.0,
+        0.0,
         1.0,
     );
 
@@ -1597,13 +1673,16 @@ fn draw_bento_dashboard_canvas(
         }
         NavTab::Settings => {
             draw_center_settings_view(
-                canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
-            );
-            None
-        }
-        NavTab::About => {
-            draw_center_about_help_view(
-                canvas, hit_zones, mx, my, center_x, center_y, center_w, center_h, state,
+                canvas,
+                hit_zones,
+                mx,
+                my,
+                center_x,
+                center_y,
+                center_w,
+                center_h,
+                state,
+                settings_section,
             );
             None
         }
@@ -1612,33 +1691,33 @@ fn draw_bento_dashboard_canvas(
     // Optional feedback toast pill at top-center of Center Card
     if let Some(toast) = state.status_toast {
         if !toast.is_empty() {
-            let tw = canvas.measure_text_width(toast, 13.0, FontWeight::Semibold);
-            let pill_w = (tw + 34.0).min(center_w - 32.0);
+            let tw = canvas.measure_text_width(toast, 12.5, FontWeight::Semibold);
+            let pill_w = (tw + 30.0).min(center_w - 32.0);
             let pill_x = center_x + (center_w - pill_w) * 0.5;
-            let pill_y = center_y + 14.0;
+            let pill_y = center_y + 10.0;
             canvas.draw_rounded_card(
                 pill_x,
                 pill_y,
                 pill_w,
-                32.0,
-                16.0,
-                Rgb(19, 27, 46),
-                APPLE_BLUE,
-                1.0,
+                30.0,
+                8.0,
+                TEXT_PRIMARY,
+                TEXT_PRIMARY,
+                0.0,
                 SHADOW_SLATE,
-                0.18,
-                10.0,
-                3.0,
-                0.96,
+                0.0,
+                0.0,
+                0.0,
+                0.95,
             );
-            let fitted = canvas.fit_text_to_width(toast, pill_w - 22.0, 13.0, FontWeight::Semibold);
-            let cap = canvas.cap_height(13.0, FontWeight::Semibold);
-            let ftw = canvas.measure_text_width(&fitted, 13.0, FontWeight::Semibold);
+            let fitted = canvas.fit_text_to_width(toast, pill_w - 20.0, 12.5, FontWeight::Semibold);
+            let cap = canvas.cap_height(12.5, FontWeight::Semibold);
+            let ftw = canvas.measure_text_width(&fitted, 12.5, FontWeight::Semibold);
             canvas.draw_text_baseline(
                 &fitted,
                 pill_x + (pill_w - ftw) * 0.5,
-                pill_y + (32.0 + cap) * 0.5,
-                13.0,
+                pill_y + (30.0 + cap) * 0.5,
+                12.5,
                 FontWeight::Semibold,
                 CARD_WHITE,
                 1.0,
@@ -1650,6 +1729,7 @@ fn draw_bento_dashboard_canvas(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw_right_column_cards(
     canvas: &mut UiCanvas,
     hit_zones: &mut Vec<HitZone>,
@@ -1657,64 +1737,79 @@ fn draw_right_column_cards(
     my: f32,
     col_x: f32,
     col_w: f32,
+    top_y: f32,
+    avail_h: f32,
     state: &DashboardViewState<'_>,
 ) {
-    let col_cx = col_x + col_w * 0.5;
+    // If ultra-narrow stacked mode gives us a wide horizontal strip (avail_h < 220 && col_w > 380),
+    // place Recording and Mirror Quality side-by-side so nothing clips!
+    let side_by_side = avail_h < 230.0 && col_w >= 380.0;
+    let gap = 12.0;
+
+    let (rec_x, rec_y, rec_w, rec_h, qual_x, qual_y, qual_w, qual_h) = if side_by_side {
+        let half_w = (col_w - gap) * 0.5;
+        (col_x, top_y, half_w, avail_h, col_x + half_w + gap, top_y, half_w, avail_h)
+    } else {
+        let scale = (avail_h / 396.0).min(1.0);
+        let r_h = (206.0 * scale).max(114.0);
+        let q_h = (114.0 * scale).max(80.0);
+        (col_x, top_y, col_w, r_h, col_x, top_y + r_h + gap, col_w, q_h)
+    };
+
+    let rec_cx = rec_x + rec_w * 0.5;
+    let qual_cx = qual_x + qual_w * 0.5;
 
     // ========================================================================
-    // Card 1: Recording Card (y = 72, h = 236)
+    // Card 1: Dedicated Recording Controls
     // ========================================================================
-    let rec_y = 72.0;
-    let rec_h = 236.0;
     canvas.draw_rounded_card(
-        col_x,
+        rec_x,
         rec_y,
-        col_w,
+        rec_w,
         rec_h,
-        20.0,
+        14.0,
         CARD_WHITE,
         CARD_BORDER,
         1.0,
         SHADOW_SLATE,
-        0.05,
-        18.0,
-        5.0,
+        0.0,
+        0.0,
+        0.0,
         1.0,
     );
 
-    // Header: Red dot + "Recording" + Right status badge ("Off" / "ON" / "Auto")
-    let rec_hdr_cy = rec_y + 34.0;
-    canvas.draw_circle(col_x + 28.0, rec_hdr_cy, 7.5, ERROR_BG, 1.0);
-    canvas.draw_circle(col_x + 28.0, rec_hdr_cy, 4.8, ERROR_RED, 1.0);
+    let compact_rec = rec_h < 170.0;
+    let rec_hdr_cy = rec_y + if compact_rec { 22.0 } else { 28.0 };
+    canvas.draw_circle(rec_x + 20.0, rec_hdr_cy, 4.5, ERROR_RED, 1.0);
 
-    let hdr_cap = canvas.cap_height(16.0, FontWeight::Bold);
+    let hdr_cap = canvas.cap_height(14.5, FontWeight::Semibold);
     canvas.draw_text_baseline(
         "Recording",
-        col_x + 44.0,
+        rec_x + 32.0,
         rec_hdr_cy + hdr_cap * 0.5,
-        16.0,
-        FontWeight::Bold,
+        14.5,
+        FontWeight::Semibold,
         TEXT_PRIMARY,
         1.0,
     );
 
     let (badge_label, badge_bg, badge_fg) = if state.is_recording {
-        ("ON", ERROR_BG, ERROR_RED)
+        ("REC", ERROR_BG, ERROR_RED)
     } else if state.settings.auto_record {
-        ("Auto", WARNING_AMBER_SOFT, WARNING_AMBER)
+        ("Auto", APPLE_BLUE_SOFT, APPLE_BLUE)
     } else {
-        ("Off", BADGE_OFF_BG, TEXT_BODY)
+        ("Off", BADGE_OFF_BG, TEXT_SECONDARY)
     };
-    let badge_w = 50.0;
-    let badge_h = 28.0;
-    let badge_x = col_x + col_w - badge_w - 18.0;
+    let badge_w = 46.0;
+    let badge_h = 24.0;
+    let badge_x = rec_x + rec_w - badge_w - 14.0;
     let badge_y = rec_hdr_cy - badge_h * 0.5;
     canvas.draw_rounded_card(
         badge_x,
         badge_y,
         badge_w,
         badge_h,
-        14.0,
+        12.0,
         badge_bg,
         badge_bg,
         0.0,
@@ -1724,29 +1819,31 @@ fn draw_right_column_cards(
         0.0,
         1.0,
     );
-    let bw_txt = canvas.measure_text_width(badge_label, 12.2, FontWeight::Semibold);
-    let b_cap = canvas.cap_height(12.2, FontWeight::Semibold);
+    let bw_txt = canvas.measure_text_width(badge_label, 11.5, FontWeight::Semibold);
+    let b_cap = canvas.cap_height(11.5, FontWeight::Semibold);
     canvas.draw_text_baseline(
         badge_label,
         badge_x + (badge_w - bw_txt) * 0.5,
         badge_y + (badge_h + b_cap) * 0.5,
-        12.2,
+        11.5,
         FontWeight::Semibold,
         badge_fg,
         1.0,
     );
 
-    // Large Tabular Timer: "00:00:00"
+    // Tabular Timer: "00:00:00"
     let timer_str = format_hh_mm_ss(if state.is_recording {
         state.rec_elapsed_secs
     } else {
         0
     });
+    let timer_sz = if compact_rec { 22.0 } else { 27.0 };
+    let timer_y = rec_y + (rec_h * 0.28);
     canvas.draw_text_centered(
         &timer_str,
-        col_cx,
-        rec_y + 68.0,
-        29.0,
+        rec_cx,
+        timer_y,
+        timer_sz,
         FontWeight::Bold,
         if state.is_recording {
             ERROR_RED
@@ -1757,49 +1854,62 @@ fn draw_right_column_cards(
     );
 
     // Status subtext below timer
-    let rec_subtext = if state.is_recording {
-        "Recording MP4 in progress..."
-    } else if let Some(saved) = state.last_saved_recording {
-        saved
-    } else if state.settings.auto_record {
-        "Auto-record armed for mirror"
-    } else {
-        "No recording in progress"
-    };
-    let fitted_rec_sub =
-        canvas.fit_text_to_width(rec_subtext, col_w - 28.0, 12.8, FontWeight::Regular);
-    canvas.draw_text_centered(
-        &fitted_rec_sub,
-        col_cx,
-        rec_y + 118.0,
-        12.8,
-        FontWeight::Regular,
-        TEXT_SECONDARY,
-        1.0,
-    );
+    if !compact_rec {
+        let rec_subtext = if state.is_recording {
+            "Recording MP4 in progress..."
+        } else if let Some(saved) = state.last_saved_recording {
+            saved
+        } else if state.settings.auto_record {
+            "Auto-record armed for mirror"
+        } else {
+            "No recording in progress"
+        };
+        let fitted_rec_sub =
+            canvas.fit_text_to_width(rec_subtext, rec_w - 28.0, 12.0, FontWeight::Regular);
+        canvas.draw_text_centered(
+            &fitted_rec_sub,
+            rec_cx,
+            timer_y + 38.0,
+            12.0,
+            FontWeight::Regular,
+            TEXT_SECONDARY,
+            1.0,
+        );
+    }
 
-    // Action Button: "[ ● Start Recording ]"
+    // Action Button: Start / Stop Recording (Red used strictly for recording control)
+    let btn_h = if compact_rec { 36.0 } else { 42.0 };
     let rec_btn_rect = SDL_FRect {
-        x: col_x + 18.0,
-        y: rec_y + 160.0,
-        w: col_w - 36.0,
-        h: 50.0,
+        x: rec_x + 14.0,
+        y: rec_y + rec_h - btn_h - 16.0,
+        w: rec_w - 28.0,
+        h: btn_h,
     };
     let rec_btn_hover = point_in_rect(mx, my, &rec_btn_rect);
-    let rec_btn_fill = if rec_btn_hover {
-        ERROR_BG_HOVER
+    let (rec_btn_fill, rec_btn_border, rec_btn_fg) = if state.is_recording {
+        let fill = if rec_btn_hover {
+            Rgb(195, 30, 30)
+        } else {
+            ERROR_RED
+        };
+        (fill, fill, CARD_WHITE)
     } else {
-        ERROR_BG
+        let fill = if rec_btn_hover {
+            ERROR_BG_HOVER
+        } else {
+            ERROR_BG
+        };
+        (fill, Rgb(245, 198, 204), ERROR_RED)
     };
     canvas.draw_rounded_card(
         rec_btn_rect.x,
         rec_btn_rect.y,
         rec_btn_rect.w,
         rec_btn_rect.h,
-        25.0,
+        btn_h * 0.5,
         rec_btn_fill,
-        Rgb(248, 212, 218),
-        0.8,
+        rec_btn_border,
+        1.0,
         SHADOW_SLATE,
         0.0,
         0.0,
@@ -1814,21 +1924,38 @@ fn draw_right_column_cards(
     } else {
         "Start Recording"
     };
-    let rbl_w = canvas.measure_text_width(rec_btn_label, 14.0, FontWeight::Semibold);
-    let rbl_cap = canvas.cap_height(14.0, FontWeight::Semibold);
-    let rbl_total_w = 18.0 + rbl_w;
+    let rbl_w = canvas.measure_text_width(rec_btn_label, 13.5, FontWeight::Semibold);
+    let rbl_cap = canvas.cap_height(13.5, FontWeight::Semibold);
+    let rbl_total_w = 16.0 + rbl_w;
     let rbl_start_x = rec_btn_rect.x + (rec_btn_rect.w - rbl_total_w) * 0.5;
     let rbl_cy = rec_btn_rect.y + rec_btn_rect.h * 0.5;
 
-    canvas.draw_circle(rbl_start_x + 5.0, rbl_cy, 7.2, Rgb(250, 198, 205), 1.0);
-    canvas.draw_circle(rbl_start_x + 5.0, rbl_cy, 4.6, ERROR_RED, 1.0);
+    if state.is_recording {
+        canvas.draw_rounded_card(
+            rbl_start_x,
+            rbl_cy - 4.5,
+            9.0,
+            9.0,
+            2.0,
+            CARD_WHITE,
+            CARD_WHITE,
+            0.0,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+    } else {
+        canvas.draw_circle(rbl_start_x + 4.5, rbl_cy, 4.5, ERROR_RED, 1.0);
+    }
     canvas.draw_text_baseline(
         rec_btn_label,
-        rbl_start_x + 18.0,
+        rbl_start_x + 16.0,
         rbl_cy + rbl_cap * 0.5,
-        14.0,
+        13.5,
         FontWeight::Semibold,
-        TEXT_PRIMARY,
+        rec_btn_fg,
         1.0,
     );
 
@@ -1838,52 +1965,51 @@ fn draw_right_column_cards(
     });
 
     // ========================================================================
-    // Card 2: Mirror Quality Card (y = 324, h = 150)
+    // Card 2: Compact Mirror Quality Control (Auto | HD | FHD)
     // ========================================================================
-    let qual_y = 324.0;
-    let qual_h = 150.0;
     canvas.draw_rounded_card(
-        col_x,
+        qual_x,
         qual_y,
-        col_w,
+        qual_w,
         qual_h,
-        20.0,
+        14.0,
         CARD_WHITE,
         CARD_BORDER,
         1.0,
         SHADOW_SLATE,
-        0.05,
-        18.0,
-        5.0,
+        0.0,
+        0.0,
+        0.0,
         1.0,
     );
 
-    let qual_hdr_cy = qual_y + 30.0;
-    canvas.draw_gear_icon(col_x + 28.0, qual_hdr_cy, 8.2, CARD_WHITE, TEXT_BODY, 1.0);
+    let qual_hdr_cy = qual_y + 22.0;
+    canvas.draw_monitor_icon(qual_x + 22.0, qual_hdr_cy, TEXT_BODY, 1.0);
+    let qual_hdr_cap = canvas.cap_height(13.8, FontWeight::Semibold);
     canvas.draw_text_baseline(
         "Mirror Quality",
-        col_x + 44.0,
-        qual_hdr_cy + hdr_cap * 0.5,
-        16.0,
-        FontWeight::Bold,
+        qual_x + 36.0,
+        qual_hdr_cy + qual_hdr_cap * 0.5,
+        13.8,
+        FontWeight::Semibold,
         TEXT_PRIMARY,
         1.0,
     );
 
-    // 3-Way Segmented Control: [ Auto | HD | FHD ]
-    let seg_x = col_x + 18.0;
-    let seg_y = qual_y + 54.0;
-    let seg_w = col_w - 36.0;
-    let seg_h = 42.0;
+    // Compact 3-Way Segmented Control: [ Auto | HD | FHD ]
+    let seg_x = qual_x + 14.0;
+    let seg_h = if qual_h < 96.0 { 30.0 } else { 36.0 };
+    let seg_y = qual_y + (qual_h - seg_h) * 0.52;
+    let seg_w = qual_w - 28.0;
     canvas.draw_rounded_card(
         seg_x,
         seg_y,
         seg_w,
         seg_h,
-        21.0,
+        seg_h * 0.5,
         PILL_NEUTRAL,
         BORDER_SUBTLE,
-        0.8,
+        1.0,
         SHADOW_SLATE,
         0.0,
         0.0,
@@ -1904,20 +2030,19 @@ fn draw_right_column_cards(
         let is_hov = point_in_rect(mx, my, &q_rect);
 
         if is_sel {
-            canvas.draw_gradient_rounded_card(
-                q_rect.x,
-                q_rect.y,
-                q_rect.w,
-                q_rect.h,
-                21.0,
-                BLUE_GRAD_TOP,
+            canvas.draw_rounded_card(
+                q_rect.x + 2.0,
+                q_rect.y + 2.0,
+                q_rect.w - 4.0,
+                q_rect.h - 4.0,
+                (seg_h - 4.0) * 0.5,
                 APPLE_BLUE,
                 APPLE_BLUE,
                 0.0,
-                APPLE_BLUE,
-                0.18,
-                8.0,
-                2.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
                 1.0,
             );
         } else if is_hov {
@@ -1926,7 +2051,7 @@ fn draw_right_column_cards(
                 q_rect.y + 2.0,
                 q_rect.w - 4.0,
                 q_rect.h - 4.0,
-                19.0,
+                (seg_h - 4.0) * 0.5,
                 PILL_NEUTRAL_HOVER,
                 PILL_NEUTRAL_HOVER,
                 0.0,
@@ -1938,39 +2063,20 @@ fn draw_right_column_cards(
             );
         }
 
-        // Subtle divider between unselected segments
-        if idx == 1 && state.settings.quality == MirrorQuality::Auto {
-            canvas.fill_rect(
-                (q_rect.x + q_rect.w) as i32,
-                (seg_y + 11.0) as i32,
-                1,
-                20,
-                BORDER_SUBTLE,
-            );
-        } else if idx == 0 && state.settings.quality == MirrorQuality::Fhd {
-            canvas.fill_rect(
-                (q_rect.x + q_rect.w) as i32,
-                (seg_y + 11.0) as i32,
-                1,
-                20,
-                BORDER_SUBTLE,
-            );
-        }
-
         let lbl = q.label();
         let weight = if is_sel {
             FontWeight::Semibold
         } else {
             FontWeight::Regular
         };
-        let fg = if is_sel { CARD_WHITE } else { TEXT_PRIMARY };
-        let lw = canvas.measure_text_width(lbl, 13.8, weight);
-        let l_cap = canvas.cap_height(13.8, weight);
+        let fg = if is_sel { CARD_WHITE } else { TEXT_BODY };
+        let lw = canvas.measure_text_width(lbl, 12.8, weight);
+        let l_cap = canvas.cap_height(12.8, weight);
         canvas.draw_text_baseline(
             lbl,
             q_rect.x + (q_rect.w - lw) * 0.5,
             q_rect.y + (q_rect.h + l_cap) * 0.5,
-            13.8,
+            12.8,
             weight,
             fg,
             1.0,
@@ -1982,122 +2088,106 @@ fn draw_right_column_cards(
         });
     }
 
-    let q_caption = canvas.fit_text_to_width(
-        state.settings.quality.caption(),
-        col_w - 24.0,
-        12.2,
-        FontWeight::Regular,
-    );
+    // Small secondary text displaying resolution and FPS info
+    let res_label = match state.settings.quality {
+        MirrorQuality::Auto => {
+            if state.is_mirroring && state.stream_width > 0 && state.stream_height > 0 {
+                format!(
+                    "{}×{} • {} FPS • {} Mbps",
+                    state.stream_width, state.stream_height, state.fps, state.settings.bitrate_mbps
+                )
+            } else {
+                format!(
+                    "Native • {} FPS • {} Mbps",
+                    state.settings.target_fps, state.settings.bitrate_mbps
+                )
+            }
+        }
+        MirrorQuality::Hd => format!(
+            "720p • {} FPS • Low Latency",
+            state.settings.target_fps
+        ),
+        MirrorQuality::Fhd => format!(
+            "1080p+ • {} FPS • {} Mbps",
+            state.settings.target_fps, state.settings.bitrate_mbps
+        ),
+    };
+    let q_caption = canvas.fit_text_to_width(&res_label, qual_w - 24.0, 11.8, FontWeight::Regular);
     canvas.draw_text_centered(
         &q_caption,
-        col_cx,
-        qual_y + 110.0,
-        12.2,
+        qual_cx,
+        qual_y + qual_h - 24.0,
+        11.8,
         FontWeight::Regular,
         TEXT_SECONDARY,
         1.0,
     );
 
     // ========================================================================
-    // Card 3: Quick Tools Card (y = 490, h = 216)
+    // Card 3: Slim 1-Line AirPlay Toggle Card (Option 1)
     // ========================================================================
-    let qt_y = 490.0;
-    let qt_h = 216.0;
-    canvas.draw_rounded_card(
-        col_x,
-        qt_y,
-        col_w,
-        qt_h,
-        20.0,
-        CARD_WHITE,
-        CARD_BORDER,
-        1.0,
-        SHADOW_SLATE,
-        0.05,
-        18.0,
-        5.0,
-        1.0,
-    );
+    if !side_by_side {
+        let ap_y = qual_y + qual_h + gap;
+        let ap_h = (top_y + avail_h - ap_y).min(48.0);
+        if ap_h >= 34.0 {
+            let ap_rect = SDL_FRect {
+                x: col_x,
+                y: ap_y,
+                w: col_w,
+                h: ap_h,
+            };
+            let ap_hov = point_in_rect(mx, my, &ap_rect);
+            let ap_bg = if ap_hov {
+                Rgb(248, 250, 254)
+            } else {
+                CARD_WHITE
+            };
+            canvas.draw_rounded_card(
+                ap_rect.x,
+                ap_rect.y,
+                ap_rect.w,
+                ap_rect.h,
+                14.0,
+                ap_bg,
+                CARD_BORDER,
+                1.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
 
-    let qt_hdr_cy = qt_y + 30.0;
-    canvas.draw_wrench_screwdriver_icon(col_x + 28.0, qt_hdr_cy, TEXT_BODY, 1.0);
-    canvas.draw_text_baseline(
-        "Quick Tools",
-        col_x + 44.0,
-        qt_hdr_cy + hdr_cap * 0.5,
-        16.0,
-        FontWeight::Bold,
-        TEXT_PRIMARY,
-        1.0,
-    );
+            let ap_cy = ap_y + ap_h * 0.5;
+            let ap_on = state.settings.airplay_enabled;
+            let wifi_col = if ap_on { APPLE_BLUE } else { TEXT_SECONDARY };
+            canvas.draw_wifi_icon(col_x + 22.0, ap_cy, wifi_col, 1.0);
 
-    let tool_rows = [
-        (0, "Open Recordings", qt_y + 56.0, UiAction::OpenRecordingsFolder),
-        (1, "Settings", qt_y + 106.0, UiAction::SwitchTab(NavTab::Settings)),
-        (2, "Help & Support", qt_y + 156.0, UiAction::SwitchTab(NavTab::About)),
-    ];
+            let ap_cap = canvas.cap_height(13.5, FontWeight::Semibold);
+            canvas.draw_text_baseline(
+                "AirPlay",
+                col_x + 38.0,
+                ap_cy + ap_cap * 0.5,
+                13.5,
+                FontWeight::Semibold,
+                TEXT_PRIMARY,
+                1.0,
+            );
 
-    for (icon_kind, label, ry, action) in tool_rows {
-        let r_rect = SDL_FRect {
-            x: col_x + 18.0,
-            y: ry,
-            w: col_w - 36.0,
-            h: 42.0,
-        };
-        let is_hov = point_in_rect(mx, my, &r_rect);
-        let row_bg = if is_hov {
-            PILL_NEUTRAL_HOVER
-        } else {
-            PILL_NEUTRAL
-        };
-        canvas.draw_rounded_card(
-            r_rect.x,
-            r_rect.y,
-            r_rect.w,
-            r_rect.h,
-            12.0,
-            row_bg,
-            row_bg,
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
+            canvas.draw_toggle_switch(
+                col_x + col_w - 54.0,
+                ap_cy - 11.0,
+                40.0,
+                22.0,
+                ap_on,
+                if ap_hov { 1.0 } else { 0.0 },
+            );
 
-        let r_cy = r_rect.y + r_rect.h * 0.5;
-        let icon_cx = r_rect.x + 20.0;
-        match icon_kind {
-            0 => canvas.draw_folder_icon(icon_cx, r_cy, TEXT_BODY, 1.0),
-            1 => canvas.draw_gear_icon(icon_cx, r_cy, 7.6, row_bg, TEXT_BODY, 1.0),
-            _ => canvas.draw_help_circle_icon(icon_cx, r_cy, TEXT_BODY, 1.0),
+            hit_zones.push(HitZone {
+                rect: ap_rect,
+                action: UiAction::ToggleAirPlay,
+            });
         }
-
-        let r_cap = canvas.cap_height(13.6, FontWeight::Semibold);
-        canvas.draw_text_baseline(
-            label,
-            r_rect.x + 38.0,
-            r_cy + r_cap * 0.5,
-            13.6,
-            FontWeight::Semibold,
-            TEXT_PRIMARY,
-            1.0,
-        );
-
-        canvas.draw_chevron_right(
-            r_rect.x + r_rect.w - 16.0,
-            r_cy,
-            4.4,
-            1.7,
-            TEXT_SECONDARY,
-            0.9,
-        );
-
-        hit_zones.push(HitZone {
-            rect: r_rect,
-            action,
-        });
     }
 }
 
@@ -2115,64 +2205,87 @@ fn draw_center_home_hero_view(
     state: &DashboardViewState<'_>,
 ) {
     let cx = card_x + card_w * 0.5;
+    let pad_x = (card_w * 0.05).clamp(14.0, 28.0);
+    let pad_y = (card_h * 0.03).clamp(10.0, 20.0);
 
-    // 1. Hero 3D Laptop + Signal Waves + Smartphone Illustration
-    canvas.draw_hero_laptop_phone_illustration(cx, card_y + 30.0, state.is_connecting);
+    // 1. Bottom Connection & AirPlay Bar (anchored cleanly at bottom of center card)
+    let banner_h = (card_h * 0.13).clamp(54.0, 72.0);
+    let banner_w = (card_w - pad_x * 2.0).max(200.0);
+    let banner_x = (cx - banner_w * 0.5).round();
+    let banner_y = (card_y + card_h - banner_h - pad_y).round();
 
-    // 2. Hero Title: "Mobile Mirror"
+    // 2. Dynamically size and vertically center the hero stack above the bottom bar
+    let avail_hero_h = (banner_y - card_y - 12.0).max(160.0);
+    let hero_size = (avail_hero_h * 0.30).clamp(52.0, 120.0);
+    let title_sz = if avail_hero_h < 250.0 { 20.0 } else { 26.0 };
+    let sub_sz = if avail_hero_h < 250.0 { 12.5 } else { 14.0 };
+    let btn_h = (avail_hero_h * 0.12).clamp(36.0, 48.0);
+    let btn_w = (card_w * 0.44).clamp(176.0, 232.0);
+
+    let gap1 = (avail_hero_h * 0.045).clamp(6.0, 16.0);
+    let gap2 = (avail_hero_h * 0.025).clamp(4.0, 10.0);
+    let gap3 = (avail_hero_h * 0.065).clamp(10.0, 24.0);
+
+    let total_stack_h = hero_size + gap1 + title_sz + gap2 + sub_sz + gap3 + btn_h;
+    let top_y = (card_y + (avail_hero_h - total_stack_h) * 0.48).max(card_y + 10.0);
+
+    // Hero Logo
+    canvas.draw_hero_illustration_sized(cx, top_y, hero_size, state.is_connecting);
+
+    // Application Title
+    let title_y = top_y + hero_size + gap1;
     canvas.draw_text_centered(
         "Mobile Mirror",
         cx,
-        card_y + 292.0,
-        29.0,
+        title_y,
+        title_sz,
         FontWeight::Bold,
         TEXT_PRIMARY,
         1.0,
     );
 
-    // 3. Hero Subtitle: "Mirror and record your phone screen on your laptop"
+    // Short Description
+    let sub_y = title_y + title_sz + gap2;
     let subtitle = "Mirror and record your phone screen on your laptop";
-    let fitted_sub = canvas.fit_text_to_width(subtitle, card_w - 40.0, 15.0, FontWeight::Regular);
+    let fitted_sub = canvas.fit_text_to_width(subtitle, card_w - 36.0, sub_sz, FontWeight::Regular);
     canvas.draw_text_centered(
         &fitted_sub,
         cx,
-        card_y + 344.0,
-        15.0,
+        sub_y,
+        sub_sz,
         FontWeight::Regular,
-        TEXT_BODY,
+        TEXT_SECONDARY,
         1.0,
     );
 
-    // 4. Primary CTA Pill Button: "[ ▶  Start Mirroring ]"
-    let btn_w = 256.0;
-    let btn_h = 56.0;
+    // Primary Blue Pill Button: "[ ▶  Start Mirroring ]"
+    let btn_y = (sub_y + sub_sz + gap3).round();
     let btn_rect = SDL_FRect {
         x: (cx - btn_w * 0.5).round(),
-        y: (card_y + 398.0).round(),
+        y: btn_y,
         w: btn_w,
         h: btn_h,
     };
     let btn_hover = point_in_rect(mx, my, &btn_rect);
-    let (grad_top, grad_bot) = if btn_hover {
-        (BLUE_GRAD_HOVER_TOP, BLUE_GRAD_HOVER_BOT)
+    let btn_fill = if btn_hover {
+        BLUE_GRAD_HOVER_TOP
     } else {
-        (BLUE_GRAD_TOP, BLUE_GRAD_BOT)
+        APPLE_BLUE
     };
 
-    canvas.draw_gradient_rounded_card(
+    canvas.draw_rounded_card(
         btn_rect.x,
         btn_rect.y,
         btn_rect.w,
         btn_rect.h,
         btn_h * 0.5,
-        grad_top,
-        grad_bot,
-        APPLE_BLUE,
+        btn_fill,
+        btn_fill,
         0.0,
-        APPLE_BLUE,
-        0.28,
-        18.0,
-        6.0,
+        SHADOW_SLATE,
+        0.0,
+        0.0,
+        0.0,
         1.0,
     );
 
@@ -2181,18 +2294,19 @@ fn draw_center_home_hero_view(
     } else {
         "Start Mirroring"
     };
-    let bl_w = canvas.measure_text_width(btn_label, 15.8, FontWeight::Semibold);
-    let bl_cap = canvas.cap_height(15.8, FontWeight::Semibold);
-    let total_w = 22.0 + bl_w;
+    let btn_font_sz = if btn_h < 42.0 { 13.5 } else { 14.8 };
+    let bl_w = canvas.measure_text_width(btn_label, btn_font_sz, FontWeight::Semibold);
+    let bl_cap = canvas.cap_height(btn_font_sz, FontWeight::Semibold);
+    let total_w = 20.0 + bl_w;
     let start_x = btn_rect.x + (btn_rect.w - total_w) * 0.5;
     let btn_cy = btn_rect.y + btn_rect.h * 0.5;
 
-    canvas.draw_play_icon(start_x + 6.0, btn_cy, 11.5, CARD_WHITE, 1.0);
+    canvas.draw_play_icon(start_x + 5.0, btn_cy, 10.5, CARD_WHITE, 1.0);
     canvas.draw_text_baseline(
         btn_label,
-        start_x + 22.0,
+        start_x + 20.0,
         btn_cy + bl_cap * 0.5,
-        15.8,
+        btn_font_sz,
         FontWeight::Semibold,
         CARD_WHITE,
         1.0,
@@ -2203,18 +2317,13 @@ fn draw_center_home_hero_view(
         action: UiAction::StartMirroring,
     });
 
-    // 5. Bottom Info Banner ("Connect your phone via USB" + "How to Enable? >")
-    let banner_h = 84.0;
-    let banner_x = card_x + 18.0;
-    let banner_w = (card_w - 36.0).max(260.0);
-    let banner_y = (card_y + card_h - banner_h - 22.0).max(btn_rect.y + btn_rect.h + 22.0);
-
+    // 3. Draw Bottom Connection Banner
     canvas.draw_rounded_card(
         banner_x,
         banner_y,
         banner_w,
         banner_h,
-        16.0,
+        12.0,
         BANNER_USB_BG,
         BANNER_USB_BORDER,
         1.0,
@@ -2226,73 +2335,95 @@ fn draw_center_home_hero_view(
     );
 
     let b_cy = banner_y + banner_h * 0.5;
-    canvas.draw_phone_outline_icon(banner_x + 28.0, b_cy, TEXT_BODY, 1.0);
+    canvas.draw_phone_outline_icon(banner_x + 24.0, b_cy, TEXT_BODY, 1.0);
 
-    // Right link button: "How to Enable? >"
-    let link_label = "How to Enable?";
-    let link_w = canvas.measure_text_width(link_label, 12.8, FontWeight::Semibold);
-    let link_rect = SDL_FRect {
-        x: banner_x + banner_w - link_w - 28.0,
-        y: banner_y + 20.0,
-        w: link_w + 22.0,
-        h: 44.0,
-    };
-    let link_hover = point_in_rect(mx, my, &link_rect);
-    let link_col = if link_hover {
-        BLUE_GRAD_HOVER_BOT
+    // Right "Setup guide" link if banner is wide enough
+    let mut right_limit = banner_x + banner_w - 14.0;
+    if banner_w >= 340.0 {
+        let link_label = "Setup guide";
+        let link_w = canvas.measure_text_width(link_label, 12.0, FontWeight::Semibold);
+        let link_rect = SDL_FRect {
+            x: banner_x + banner_w - link_w - 22.0,
+            y: b_cy - 14.0,
+            w: link_w + 16.0,
+            h: 28.0,
+        };
+        let link_hover = point_in_rect(mx, my, &link_rect);
+        let link_col = if link_hover {
+            BLUE_GRAD_HOVER_TOP
+        } else {
+            APPLE_BLUE
+        };
+        let link_cap = canvas.cap_height(12.0, FontWeight::Semibold);
+        canvas.draw_text_baseline(
+            link_label,
+            link_rect.x + 2.0,
+            b_cy + link_cap * 0.5,
+            12.0,
+            FontWeight::Semibold,
+            link_col,
+            1.0,
+        );
+        hit_zones.push(HitZone {
+            rect: link_rect,
+            action: UiAction::OpenHelpInSettings,
+        });
+        right_limit = link_rect.x - 8.0;
+    }
+
+    // Middle connection state & instructions
+    let text_x = banner_x + 48.0;
+    let max_text_w = (right_limit - text_x).max(90.0);
+
+    let (title_text, title_color, sub_text) = if state.is_connecting {
+        (
+            state.headline.to_string(),
+            APPLE_BLUE,
+            state.subtext.to_string(),
+        )
+    } else if state.is_warning {
+        (
+            state.headline.to_string(),
+            WARNING_AMBER,
+            state.subtext.to_string(),
+        )
+    } else if let Some(serial) = state.device_serial {
+        let plat = state.platform_label.unwrap_or("USB");
+        (
+            format!("Ready • {} ({})", plat, serial),
+            LIVE_GREEN,
+            "Click Start Mirroring above to begin".to_string(),
+        )
     } else {
-        APPLE_BLUE
+        (
+            "Connect your Android or iPhone".to_string(),
+            TEXT_PRIMARY,
+            if state.settings.airplay_enabled {
+                "Use USB cable or connect via Wi-Fi (AirPlay Ready)".to_string()
+            } else {
+                "Use USB cable or enable AirPlay for Wi-Fi".to_string()
+            },
+        )
     };
-    let link_cap = canvas.cap_height(12.8, FontWeight::Semibold);
-    canvas.draw_text_baseline(
-        link_label,
-        link_rect.x + 2.0,
-        b_cy + link_cap * 0.5,
-        12.8,
-        FontWeight::Semibold,
-        link_col,
-        1.0,
-    );
-    canvas.draw_chevron_right(
-        link_rect.x + link_w + 11.0,
-        b_cy,
-        4.2,
-        1.7,
-        link_col,
-        1.0,
-    );
-    hit_zones.push(HitZone {
-        rect: link_rect,
-        action: UiAction::SwitchTab(NavTab::About),
-    });
 
-    // Middle text lines inside Banner
-    let text_x = banner_x + 52.0;
-    let max_text_w = (link_rect.x - text_x - 8.0).max(120.0);
-    let title_color = if state.is_warning {
-        WARNING_AMBER
-    } else if state.is_connecting {
-        APPLE_BLUE
-    } else {
-        TEXT_PRIMARY
-    };
-    let line1 = canvas.fit_text_to_width(state.headline, max_text_w, 14.2, FontWeight::Bold);
-    let line2 = canvas.fit_text_to_width(state.subtext, max_text_w, 12.4, FontWeight::Regular);
+    let line1 = canvas.fit_text_to_width(&title_text, max_text_w, 13.5, FontWeight::Semibold);
+    let line2 = canvas.fit_text_to_width(&sub_text, max_text_w, 11.8, FontWeight::Regular);
 
+    let line1_y = banner_y + (banner_h - 34.0) * 0.5;
     canvas.draw_text(
         &line1,
         text_x,
-        banner_y + 20.0,
-        14.2,
-        FontWeight::Bold,
+        line1_y,
+        13.5,
+        FontWeight::Semibold,
         title_color,
         1.0,
     );
     canvas.draw_text(
         &line2,
         text_x,
-        banner_y + 46.0,
-        12.4,
+        line1_y + 20.0,
+        11.8,
         FontWeight::Regular,
         TEXT_SECONDARY,
         1.0,
@@ -2317,20 +2448,17 @@ fn draw_center_live_mirror_view(
     let bar_cy = card_y + bar_h * 0.5;
 
     canvas.draw_circle(card_x + 24.0, bar_cy, 5.0, LIVE_GREEN, 1.0);
-    let meta = format!(
-        "Live Mirror  •  {}×{}  •  {} FPS",
-        state.stream_width, state.stream_height, state.fps
-    );
-    let m_cap = canvas.cap_height(13.8, FontWeight::Semibold);
-    canvas.draw_text_baseline(
-        &meta,
-        card_x + 38.0,
-        bar_cy + m_cap * 0.5,
-        13.8,
-        FontWeight::Semibold,
-        TEXT_PRIMARY,
-        1.0,
-    );
+    let meta = if let Some(plat) = state.platform_label {
+        format!(
+            "Live ({})  •  {}×{}  •  {} FPS",
+            plat, state.stream_width, state.stream_height, state.fps
+        )
+    } else {
+        format!(
+            "Live Mirror  •  {}×{}  •  {} FPS",
+            state.stream_width, state.stream_height, state.fps
+        )
+    };
 
     // Right control pills inside Center Card header: [Mic] [Compact] [F11 Full] [Stop]
     let stop_rect = SDL_FRect {
@@ -2357,6 +2485,23 @@ fn draw_center_live_mirror_view(
         w: 80.0,
         h: 30.0,
     };
+
+    let meta_fit = canvas.fit_text_to_width(
+        &meta,
+        (mic_rect.x - (card_x + 38.0) - 10.0).max(80.0),
+        13.8,
+        FontWeight::Semibold,
+    );
+    let m_cap = canvas.cap_height(13.8, FontWeight::Semibold);
+    canvas.draw_text_baseline(
+        &meta_fit,
+        card_x + 38.0,
+        bar_cy + m_cap * 0.5,
+        13.8,
+        FontWeight::Semibold,
+        TEXT_PRIMARY,
+        1.0,
+    );
 
     // Mic pill
     let mic_bg = if state.settings.mic_enabled {
@@ -2408,29 +2553,29 @@ fn draw_center_live_mirror_view(
 
     // Disconnect pill
     let stop_bg = if point_in_rect(mx, my, &stop_rect) {
-        ERROR_BG_HOVER
+        PILL_NEUTRAL_HOVER
     } else {
-        ERROR_BG
+        PILL_NEUTRAL
     };
-    draw_small_pill(canvas, &stop_rect, "Stop", stop_bg, ERROR_RED);
+    draw_small_pill(canvas, &stop_rect, "Stop", stop_bg, TEXT_PRIMARY);
     hit_zones.push(HitZone {
         rect: stop_rect,
         action: UiAction::StopMirroring,
     });
 
-    // Dark obsidian stage inside Center Card for the live GPU video frame
+    // Dark obsidian stage inside Center Workspace for the live GPU video frame
     let stage = SDL_FRect {
-        x: card_x + 16.0,
+        x: card_x + 12.0,
         y: card_y + bar_h,
-        w: card_w - 32.0,
-        h: card_h - bar_h - 16.0,
+        w: card_w - 24.0,
+        h: card_h - bar_h - 12.0,
     };
     canvas.draw_rounded_card(
         stage.x,
         stage.y,
         stage.w,
         stage.h,
-        14.0,
+        10.0,
         Rgb(12, 16, 26),
         BORDER_SUBTLE,
         1.0,
@@ -2443,7 +2588,9 @@ fn draw_center_live_mirror_view(
     stage
 }
 
-/// Renders the functional `Recordings` Manager inside the Center Card.
+/// Renders the functional `Recordings` Gallery inside the Center Card.
+/// Displays recorded videos in an orderly, responsive Bento grid with filmstrip
+/// thumbnail previews (Image 2 style), video metadata, and Play/Show/Delete actions.
 #[allow(clippy::too_many_arguments)]
 fn draw_center_recordings_view(
     canvas: &mut UiCanvas,
@@ -2470,7 +2617,7 @@ fn draw_center_recordings_view(
         "{} MP4 video file(s) in recordings/ folder (Zero-Copy Lossless H.264 + AAC)",
         state.recordings.len()
     );
-    let fitted_sub = canvas.fit_text_to_width(&sub, card_w - 180.0, 12.8, FontWeight::Regular);
+    let fitted_sub = canvas.fit_text_to_width(&sub, card_w - 320.0, 12.8, FontWeight::Regular);
     canvas.draw_text(
         &fitted_sub,
         card_x + 28.0,
@@ -2483,7 +2630,7 @@ fn draw_center_recordings_view(
 
     // Top-right "[ Open Folder ]" button
     let open_rect = SDL_FRect {
-        x: card_x + card_w - 150.0,
+        x: card_x + card_w - 146.0,
         y: card_y + 24.0,
         w: 122.0,
         h: 36.0,
@@ -2499,6 +2646,7 @@ fn draw_center_recordings_view(
         action: UiAction::OpenRecordingsFolder,
     });
 
+    // Divider line below header
     canvas.fill_rect(
         (card_x + 24.0) as i32,
         (card_y + 86.0) as i32,
@@ -2539,22 +2687,108 @@ fn draw_center_recordings_view(
         return;
     }
 
-    let max_rows = ((card_h - 110.0) / 68.0).floor().max(1.0) as usize;
-    for (idx, entry) in state.recordings.iter().take(max_rows).enumerate() {
-        let ry = card_y + 100.0 + idx as f32 * 68.0;
-        let rx = card_x + 24.0;
-        let rw = card_w - 48.0;
-        let rh = 58.0;
+    // Responsive Orderly Grid measurements
+    let grid_x = card_x + 20.0;
+    let grid_y = card_y + 96.0;
+    let grid_w = (card_w - 40.0).max(160.0);
+    let grid_h = (card_h - 108.0).max(160.0);
 
+    let cols = if grid_w >= 800.0 {
+        3
+    } else if grid_w >= 430.0 {
+        2
+    } else {
+        1
+    };
+    let gap_x = 14.0;
+    let gap_y = 14.0;
+    let col_w = (grid_w - (cols as f32 - 1.0) * gap_x) / cols as f32;
+    let card_item_h = 246.0_f32.min(grid_h);
+
+    let rows = ((grid_h + gap_y) / (card_item_h + gap_y)).floor().max(1.0) as usize;
+    let page_size = cols * rows;
+    let total_pages = (state.recordings.len() + page_size - 1) / page_size;
+    let current_page = state.recordings_page.min(total_pages.saturating_sub(1));
+
+    // Pagination controls in top-right header if recordings span multiple pages
+    if total_pages > 1 {
+        let prev_rect = SDL_FRect {
+            x: open_rect.x - 146.0,
+            y: card_y + 24.0,
+            w: 32.0,
+            h: 36.0,
+        };
+        let next_rect = SDL_FRect {
+            x: open_rect.x - 42.0,
+            y: card_y + 24.0,
+            w: 32.0,
+            h: 36.0,
+        };
+        let page_label = format!("{}/{}", current_page + 1, total_pages);
+        let pl_cx = prev_rect.x + 32.0 + (next_rect.x - (prev_rect.x + 32.0)) * 0.5;
+
+        let prev_bg = if point_in_rect(mx, my, &prev_rect) {
+            PILL_NEUTRAL_HOVER
+        } else {
+            PILL_NEUTRAL
+        };
+        draw_small_pill(canvas, &prev_rect, "<", prev_bg, TEXT_PRIMARY);
+        hit_zones.push(HitZone {
+            rect: prev_rect,
+            action: UiAction::PrevRecordingsPage,
+        });
+
+        canvas.draw_text_centered(
+            &page_label,
+            pl_cx,
+            card_y + 35.0,
+            12.5,
+            FontWeight::Semibold,
+            TEXT_PRIMARY,
+            1.0,
+        );
+
+        let next_bg = if point_in_rect(mx, my, &next_rect) {
+            PILL_NEUTRAL_HOVER
+        } else {
+            PILL_NEUTRAL
+        };
+        draw_small_pill(canvas, &next_rect, ">", next_bg, TEXT_PRIMARY);
+        hit_zones.push(HitZone {
+            rect: next_rect,
+            action: UiAction::NextRecordingsPage,
+        });
+    }
+
+    let start_idx = current_page * page_size;
+    let visible_entries = state.recordings.iter().skip(start_idx).take(page_size);
+
+    for (idx, entry) in visible_entries.enumerate() {
+        let row = idx / cols;
+        let col = idx % cols;
+        let rx = grid_x + col as f32 * (col_w + gap_x);
+        let ry = grid_y + row as f32 * (card_item_h + gap_y);
+        let rw = col_w;
+        let rh = card_item_h;
+
+        let card_rect = SDL_FRect { x: rx, y: ry, w: rw, h: rh };
+        let is_card_hovered = point_in_rect(mx, my, &card_rect);
+
+        // Elevated Bento card container
+        let card_border = if is_card_hovered {
+            APPLE_BLUE_HOVER
+        } else {
+            CARD_BORDER
+        };
         canvas.draw_rounded_card(
             rx,
             ry,
             rw,
             rh,
-            14.0,
-            PILL_NEUTRAL,
-            BORDER_SUBTLE,
-            0.8,
+            10.0,
+            CARD_WHITE,
+            card_border,
+            1.0,
             SHADOW_SLATE,
             0.0,
             0.0,
@@ -2562,50 +2796,86 @@ fn draw_center_recordings_view(
             1.0,
         );
 
-        let r_cy = ry + rh * 0.5;
-        canvas.draw_circle(rx + 26.0, r_cy, 16.0, APPLE_BLUE_SOFT, 1.0);
-        canvas.draw_play_icon(rx + 26.0, r_cy, 8.5, APPLE_BLUE, 1.0);
+        // 1. Filmstrip Video Frame Preview (Screenshot 2 style!)
+        let thumb_w = rw - 20.0;
+        let thumb_h = 136.0;
+        let thumb_x = rx + 10.0;
+        let thumb_y = ry + 10.0;
+        let thumb_rect = SDL_FRect {
+            x: thumb_x,
+            y: thumb_y,
+            w: thumb_w,
+            h: thumb_h,
+        };
+        let is_thumb_hovered = point_in_rect(mx, my, &thumb_rect);
 
-        let name_fit =
-            canvas.fit_text_to_width(&entry.file_name, rw - 270.0, 13.8, FontWeight::Semibold);
+        canvas.draw_filmstrip_frame(
+            thumb_x,
+            thumb_y,
+            thumb_w,
+            thumb_h,
+            state.thumbnail_for(&entry.full_path),
+            is_thumb_hovered,
+        );
+
+        // Clicking preview directly plays the video
+        hit_zones.push(HitZone {
+            rect: thumb_rect,
+            action: UiAction::PlayRecording(entry.full_path.clone()),
+        });
+
+        // 2. Video Title below preview
+        let title_fit =
+            canvas.fit_text_to_width(&entry.file_name, rw - 24.0, 13.5, FontWeight::Semibold);
         canvas.draw_text(
-            &name_fit,
-            rx + 52.0,
-            ry + 10.0,
-            13.8,
+            &title_fit,
+            rx + 12.0,
+            ry + 158.0,
+            13.5,
             FontWeight::Semibold,
             TEXT_PRIMARY,
             1.0,
         );
+
+        // 3. Metadata (Size & Format)
         let meta_txt = format!("{}  •  MP4 (H.264 + AAC)", entry.formatted_size());
+        let meta_fit = canvas.fit_text_to_width(&meta_txt, rw - 24.0, 11.8, FontWeight::Regular);
         canvas.draw_text(
-            &meta_txt,
-            rx + 52.0,
-            ry + 32.0,
-            12.2,
+            &meta_fit,
+            rx + 12.0,
+            ry + 179.0,
+            11.8,
             FontWeight::Regular,
             TEXT_SECONDARY,
             1.0,
         );
 
-        // Action buttons: [Play] [Show] [Delete]
-        let del_rect = SDL_FRect {
-            x: rx + rw - 76.0,
-            y: ry + 13.0,
-            w: 64.0,
-            h: 32.0,
+        // 4. Action buttons: [Play] [Show] [Delete]
+        let btn_y = ry + 204.0;
+        let btn_h = 30.0;
+        let total_btn_w = rw - 24.0;
+        let btn_gap = 6.0;
+        let play_w = ((total_btn_w - btn_gap * 2.0) * 0.40).round();
+        let show_w = ((total_btn_w - btn_gap * 2.0) * 0.30).round();
+        let del_w = total_btn_w - play_w - show_w - btn_gap * 2.0;
+
+        let play_rect = SDL_FRect {
+            x: rx + 12.0,
+            y: btn_y,
+            w: play_w,
+            h: btn_h,
         };
         let show_rect = SDL_FRect {
-            x: del_rect.x - 70.0,
-            y: ry + 13.0,
-            w: 62.0,
-            h: 32.0,
+            x: play_rect.x + play_w + btn_gap,
+            y: btn_y,
+            w: show_w,
+            h: btn_h,
         };
-        let play_rect = SDL_FRect {
-            x: show_rect.x - 70.0,
-            y: ry + 13.0,
-            w: 62.0,
-            h: 32.0,
+        let del_rect = SDL_FRect {
+            x: show_rect.x + show_w + btn_gap,
+            y: btn_y,
+            w: del_w,
+            h: btn_h,
         };
 
         let play_bg = if point_in_rect(mx, my, &play_rect) {
@@ -2620,22 +2890,22 @@ fn draw_center_recordings_view(
         });
 
         let show_bg = if point_in_rect(mx, my, &show_rect) {
-            CARD_BORDER
+            PILL_NEUTRAL_HOVER
         } else {
-            CARD_WHITE
+            PILL_NEUTRAL
         };
-        draw_small_pill(canvas, &show_rect, "Show", show_bg, TEXT_BODY);
+        draw_small_pill(canvas, &show_rect, "Show", show_bg, TEXT_PRIMARY);
         hit_zones.push(HitZone {
             rect: show_rect,
             action: UiAction::RevealRecording(entry.full_path.clone()),
         });
 
         let del_bg = if point_in_rect(mx, my, &del_rect) {
-            ERROR_BG_HOVER
+            PILL_NEUTRAL_HOVER
         } else {
-            ERROR_BG
+            PILL_NEUTRAL
         };
-        draw_small_pill(canvas, &del_rect, "Delete", del_bg, ERROR_RED);
+        draw_small_pill(canvas, &del_rect, "Delete", del_bg, TEXT_BODY);
         hit_zones.push(HitZone {
             rect: del_rect,
             action: UiAction::DeleteRecording(entry.full_path.clone()),
@@ -2653,332 +2923,36 @@ fn draw_center_settings_view(
     card_x: f32,
     card_y: f32,
     card_w: f32,
-    _card_h: f32,
-    state: &DashboardViewState<'_>,
-) {
-    canvas.draw_text(
-        "Settings",
-        card_x + 28.0,
-        card_y + 22.0,
-        20.0,
-        FontWeight::Bold,
-        TEXT_PRIMARY,
-        1.0,
-    );
-    let sub_fit = canvas.fit_text_to_width(
-        "All settings apply immediately and persist automatically across sessions",
-        card_w - 180.0,
-        12.8,
-        FontWeight::Regular,
-    );
-    canvas.draw_text(
-        &sub_fit,
-        card_x + 28.0,
-        card_y + 50.0,
-        12.8,
-        FontWeight::Regular,
-        TEXT_SECONDARY,
-        1.0,
-    );
-
-    let reset_rect = SDL_FRect {
-        x: card_x + card_w - 152.0,
-        y: card_y + 22.0,
-        w: 126.0,
-        h: 34.0,
-    };
-    let reset_bg = if point_in_rect(mx, my, &reset_rect) {
-        PILL_NEUTRAL_HOVER
-    } else {
-        PILL_NEUTRAL
-    };
-    draw_small_pill(canvas, &reset_rect, "Reset Defaults", reset_bg, TEXT_BODY);
-    hit_zones.push(HitZone {
-        rect: reset_rect,
-        action: UiAction::ResetDefaultSettings,
-    });
-
-    let s = state.settings;
-    let fps_val = format!("{} FPS", s.target_fps);
-    let br_val = format!("{} Mbps ({})", s.bitrate_mbps, if s.cbr_mode { "CBR" } else { "VBR" });
-    let cbr_val = if s.cbr_mode { "Constant (CBR)" } else { "Variable (VBR)" };
-
-    #[allow(clippy::type_complexity)]
-    let rows: [(&str, &str, Option<bool>, String, UiAction); 9] = [
-        (
-            "Target Frame Rate",
-            "Hardware encoder capture frame rate (30 / 60 / 90 / 120 FPS)",
-            None,
-            fps_val,
-            UiAction::CycleFps,
-        ),
-        (
-            "Video Encoder Bitrate",
-            "H.264 stream bitrate over USB (12 / 16 / 24 / 36 / 48 Mbps)",
-            None,
-            br_val,
-            UiAction::CycleBitrate,
-        ),
-        (
-            "Bitrate Control Mode",
-            "Constant Bitrate (CBR) for lowest latency vs Variable (VBR)",
-            None,
-            cbr_val.to_string(),
-            UiAction::ToggleCbr,
-        ),
-        (
-            "Phone Microphone (Voice Isolation DSP)",
-            "Capture voice-isolated phone mic audio alongside game sound",
-            Some(s.mic_enabled),
-            String::new(),
-            UiAction::ToggleMic,
-        ),
-        (
-            "PC Speaker Audio Playback",
-            "Play phone & game audio live through your laptop speakers",
-            Some(s.pc_audio_enabled),
-            String::new(),
-            UiAction::TogglePcAudio,
-        ),
-        (
-            "Auto-Connect on USB Plug",
-            "Automatically start mirroring when an Android phone is connected",
-            Some(s.auto_connect_usb),
-            String::new(),
-            UiAction::ToggleAutoConnect,
-        ),
-        (
-            "Auto-Record on Mirror Start",
-            "Automatically start lossless MP4 recording when mirroring begins",
-            Some(s.auto_record),
-            String::new(),
-            UiAction::ToggleAutoRecord,
-        ),
-        (
-            "Always on Top Window",
-            "Keep Mobile Mirror window pinned above other desktop apps",
-            Some(s.always_on_top),
-            String::new(),
-            UiAction::ToggleAlwaysOnTop,
-        ),
-        (
-            "Hardware Video Decoder",
-            "GPU decoding acceleration backend (NVDEC / D3D11VA / DXVA2)",
-            None,
-            s.hw_backend.label().to_string(),
-            UiAction::CycleHwBackend,
-        ),
-    ];
-
-    let start_y = card_y + 84.0;
-    let row_h = 53.0;
-    let gap = 7.0;
-    let rx = card_x + 24.0;
-    let rw = card_w - 48.0;
-
-    for (idx, (title, desc, toggle_state, badge_text, action)) in rows.into_iter().enumerate() {
-        let ry = start_y + idx as f32 * (row_h + gap);
-        let row_rect = SDL_FRect {
-            x: rx,
-            y: ry,
-            w: rw,
-            h: row_h,
-        };
-        let is_hov = point_in_rect(mx, my, &row_rect);
-        let bg = if is_hov {
-            PILL_NEUTRAL_HOVER
-        } else {
-            PILL_NEUTRAL
-        };
-        canvas.draw_rounded_card(
-            rx,
-            ry,
-            rw,
-            row_h,
-            12.0,
-            bg,
-            bg,
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-
-        let right_reserve = if toggle_state.is_some() { 76.0 } else { 156.0 };
-        let fit_title =
-            canvas.fit_text_to_width(title, rw - right_reserve, 13.8, FontWeight::Semibold);
-        canvas.draw_text(
-            &fit_title,
-            rx + 16.0,
-            ry + 7.0,
-            13.8,
-            FontWeight::Semibold,
-            TEXT_PRIMARY,
-            1.0,
-        );
-        let fit_desc =
-            canvas.fit_text_to_width(desc, rw - right_reserve, 12.0, FontWeight::Regular);
-        canvas.draw_text(
-            &fit_desc,
-            rx + 16.0,
-            ry + 29.0,
-            12.0,
-            FontWeight::Regular,
-            TEXT_SECONDARY,
-            1.0,
-        );
-
-        if let Some(is_on) = toggle_state {
-            canvas.draw_toggle_switch(
-                rx + rw - 60.0,
-                ry + (row_h - 24.0) * 0.5,
-                44.0,
-                24.0,
-                is_on,
-                if is_hov { 1.0 } else { 0.0 },
-            );
-        } else {
-            let bw = (canvas.measure_text_width(&badge_text, 12.2, FontWeight::Semibold) + 24.0)
-                .max(96.0);
-            let pill_r = SDL_FRect {
-                x: rx + rw - bw - 14.0,
-                y: ry + (row_h - 30.0) * 0.5,
-                w: bw,
-                h: 30.0,
-            };
-            draw_small_pill(canvas, &pill_r, &badge_text, APPLE_BLUE_SOFT, APPLE_BLUE);
-        }
-
-        hit_zones.push(HitZone {
-            rect: row_rect,
-            action,
-        });
-    }
-}
-
-/// Renders the `About` / `Help & Support` / `How to Enable USB Debugging` view inside the Center Card.
-#[allow(clippy::too_many_arguments)]
-fn draw_center_about_help_view(
-    canvas: &mut UiCanvas,
-    hit_zones: &mut Vec<HitZone>,
-    mx: f32,
-    my: f32,
-    card_x: f32,
-    card_y: f32,
-    card_w: f32,
     card_h: f32,
     state: &DashboardViewState<'_>,
+    section: SettingsSection,
 ) {
+    let rx = card_x + 20.0;
+    let rw = card_w - 40.0;
+
     canvas.draw_text(
-        "Help, USB Debugging Guide & About",
-        card_x + 28.0,
-        card_y + 24.0,
+        "Settings",
+        rx,
+        card_y + 16.0,
         20.0,
         FontWeight::Bold,
         TEXT_PRIMARY,
         1.0,
     );
-    let sub_fit = canvas.fit_text_to_width(
-        "Follow these steps to enable USB Debugging and mirror your Android screen at 60 FPS",
-        card_w - 56.0,
-        12.8,
-        FontWeight::Regular,
-    );
-    canvas.draw_text(
-        &sub_fit,
-        card_x + 28.0,
-        card_y + 52.0,
-        12.8,
-        FontWeight::Regular,
-        TEXT_SECONDARY,
-        1.0,
-    );
 
-    let steps = [
-        (
-            "1. Open About Phone",
-            "On your Android phone, open Settings -> About Phone -> Software Information.",
-        ),
-        (
-            "2. Unlock Developer Options",
-            "Tap 'Build Number' (or MIUI/OS Version) 7 times until 'You are now a developer!' appears.",
-        ),
-        (
-            "3. Enable USB Debugging",
-            "Go to Settings -> System -> Developer Options and turn ON 'USB Debugging'.",
-        ),
-        (
-            "4. Connect via USB & Allow",
-            "Plug your phone into this laptop via USB and tap 'Allow' on the phone's RSA prompt.",
-        ),
-    ];
-
-    let rx = card_x + 24.0;
-    let rw = card_w - 48.0;
-    for (idx, (st_title, st_desc)) in steps.iter().enumerate() {
-        let sy = card_y + 88.0 + idx as f32 * 74.0;
-        canvas.draw_rounded_card(
-            rx,
-            sy,
-            rw,
-            64.0,
-            14.0,
-            PILL_NEUTRAL,
-            BORDER_SUBTLE,
-            0.8,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-        canvas.draw_circle(rx + 24.0, sy + 32.0, 14.0, APPLE_BLUE_SOFT, 1.0);
-        let num = format!("{}", idx + 1);
-        let nw = canvas.measure_text_width(&num, 13.5, FontWeight::Bold);
-        let n_cap = canvas.cap_height(13.5, FontWeight::Bold);
-        canvas.draw_text_baseline(
-            &num,
-            rx + 24.0 - nw * 0.5,
-            sy + 32.0 + n_cap * 0.5,
-            13.5,
-            FontWeight::Bold,
-            APPLE_BLUE,
-            1.0,
-        );
-
-        canvas.draw_text(
-            st_title,
-            rx + 48.0,
-            sy + 11.0,
-            14.0,
-            FontWeight::Semibold,
-            TEXT_PRIMARY,
-            1.0,
-        );
-        let fit_d = canvas.fit_text_to_width(st_desc, rw - 60.0, 12.2, FontWeight::Regular);
-        canvas.draw_text(
-            &fit_d,
-            rx + 48.0,
-            sy + 35.0,
-            12.2,
-            FontWeight::Regular,
-            TEXT_SECONDARY,
-            1.0,
-        );
-    }
-
-    // System Diagnostics Box
-    let diag_y = card_y + 392.0;
+    // Compact 2-Tab Switcher: [ Preferences | Help & About ]
+    let tab_w = 224.0;
+    let tab_h = 32.0;
+    let tab_x = rx;
+    let tab_y = card_y + 48.0;
     canvas.draw_rounded_card(
-        rx,
-        diag_y,
-        rw,
-        136.0,
-        16.0,
-        BANNER_USB_BG,
-        BANNER_USB_BORDER,
+        tab_x,
+        tab_y,
+        tab_w,
+        tab_h,
+        8.0,
+        PILL_NEUTRAL,
+        BORDER_SUBTLE,
         1.0,
         SHADOW_SLATE,
         0.0,
@@ -2986,95 +2960,516 @@ fn draw_center_about_help_view(
         0.0,
         1.0,
     );
-    canvas.draw_text(
-        "Mobile Mirror Engine Diagnostics",
-        rx + 18.0,
-        diag_y + 14.0,
-        14.2,
-        FontWeight::Bold,
-        TEXT_PRIMARY,
-        1.0,
-    );
-    let diag1 = format!(
-        "• Connection State: {} ({})",
-        state.headline,
-        state.device_serial.unwrap_or("No USB serial yet")
-    );
-    let diag2 = format!(
-        "• Active Stream Profile: {}  •  {} Mbps {}  •  {} FPS",
-        state.settings.quality.label(),
-        state.settings.bitrate_mbps,
-        if state.settings.cbr_mode { "CBR" } else { "VBR" },
-        state.settings.target_fps
-    );
-    let diag3 = format!(
-        "• Hardware Decoder: {}  •  Shortcuts: F11 Fullscreen, F View, R Record, M Mic",
-        state.settings.hw_backend.label(),
-    );
-    canvas.draw_text(
-        &canvas.fit_text_to_width(&diag1, rw - 36.0, 12.5, FontWeight::Regular),
-        rx + 18.0,
-        diag_y + 44.0,
-        12.5,
-        FontWeight::Regular,
-        TEXT_BODY,
-        1.0,
-    );
-    canvas.draw_text(
-        &canvas.fit_text_to_width(&diag2, rw - 36.0, 12.5, FontWeight::Regular),
-        rx + 18.0,
-        diag_y + 70.0,
-        12.5,
-        FontWeight::Regular,
-        TEXT_BODY,
-        1.0,
-    );
-    canvas.draw_text(
-        &canvas.fit_text_to_width(&diag3, rw - 36.0, 12.5, FontWeight::Regular),
-        rx + 18.0,
-        diag_y + 96.0,
-        12.5,
-        FontWeight::Regular,
-        TEXT_BODY,
-        1.0,
-    );
 
-    // Bottom buttons: [Check USB Device Now]  [Back to Home]
-    let btn_y = (card_y + card_h - 62.0).max(diag_y + 150.0);
-    let test_rect = SDL_FRect {
-        x: rx,
-        y: btn_y,
-        w: 204.0,
-        h: 42.0,
-    };
-    let home_rect = SDL_FRect {
-        x: rx + 216.0,
-        y: btn_y,
-        w: 148.0,
-        h: 42.0,
-    };
+    let sections = [
+        (SettingsSection::Preferences, "Preferences"),
+        (SettingsSection::HelpAbout, "Help & About"),
+    ];
+    let half_w = tab_w * 0.5;
+    for (idx, (sec, lbl)) in sections.into_iter().enumerate() {
+        let s_rect = SDL_FRect {
+            x: tab_x + idx as f32 * half_w,
+            y: tab_y,
+            w: half_w,
+            h: tab_h,
+        };
+        let is_sel = section == sec;
+        let is_hov = point_in_rect(mx, my, &s_rect);
+        if is_sel {
+            canvas.draw_rounded_card(
+                s_rect.x + 2.0,
+                s_rect.y + 2.0,
+                s_rect.w - 4.0,
+                s_rect.h - 4.0,
+                6.0,
+                APPLE_BLUE,
+                APPLE_BLUE,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+        } else if is_hov {
+            canvas.draw_rounded_card(
+                s_rect.x + 2.0,
+                s_rect.y + 2.0,
+                s_rect.w - 4.0,
+                s_rect.h - 4.0,
+                6.0,
+                PILL_NEUTRAL_HOVER,
+                PILL_NEUTRAL_HOVER,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+        }
+        let weight = if is_sel {
+            FontWeight::Semibold
+        } else {
+            FontWeight::Regular
+        };
+        let fg = if is_sel { CARD_WHITE } else { TEXT_BODY };
+        let lw = canvas.measure_text_width(lbl, 12.4, weight);
+        let l_cap = canvas.cap_height(12.4, weight);
+        canvas.draw_text_baseline(
+            lbl,
+            s_rect.x + (s_rect.w - lw) * 0.5,
+            s_rect.y + (s_rect.h + l_cap) * 0.5,
+            12.4,
+            weight,
+            fg,
+            1.0,
+        );
+        hit_zones.push(HitZone {
+            rect: s_rect,
+            action: UiAction::SwitchSettingsSection(sec),
+        });
+    }
 
-    let test_bg = if point_in_rect(mx, my, &test_rect) {
-        BLUE_GRAD_HOVER_TOP
-    } else {
-        APPLE_BLUE
-    };
-    draw_small_pill(canvas, &test_rect, "Check USB Device Now", test_bg, CARD_WHITE);
-    hit_zones.push(HitZone {
-        rect: test_rect,
-        action: UiAction::StartMirroring,
-    });
+    match section {
+        SettingsSection::Preferences => {
+            let reset_rect = SDL_FRect {
+                x: rx + rw - 122.0,
+                y: tab_y,
+                w: 122.0,
+                h: 32.0,
+            };
+            let reset_bg = if point_in_rect(mx, my, &reset_rect) {
+                PILL_NEUTRAL_HOVER
+            } else {
+                PILL_NEUTRAL
+            };
+            draw_small_pill(canvas, &reset_rect, "Reset Defaults", reset_bg, TEXT_BODY);
+            hit_zones.push(HitZone {
+                rect: reset_rect,
+                action: UiAction::ResetDefaultSettings,
+            });
 
-    let home_bg = if point_in_rect(mx, my, &home_rect) {
-        PILL_NEUTRAL_HOVER
-    } else {
-        PILL_NEUTRAL
-    };
-    draw_small_pill(canvas, &home_rect, "Back to Home", home_bg, TEXT_PRIMARY);
-    hit_zones.push(HitZone {
-        rect: home_rect,
-        action: UiAction::SwitchTab(NavTab::Home),
-    });
+            let s = state.settings;
+            let fps_val = format!("{} FPS", s.target_fps);
+            let br_val = format!(
+                "{} Mbps ({})",
+                s.bitrate_mbps,
+                if s.cbr_mode { "CBR" } else { "VBR" }
+            );
+            let cbr_val = if s.cbr_mode {
+                "Constant (CBR)"
+            } else {
+                "Variable (VBR)"
+            };
+
+            #[allow(clippy::type_complexity)]
+            let rows: [(&str, &str, Option<bool>, String, UiAction); 10] = [
+                (
+                    "Target Frame Rate",
+                    "Hardware encoder capture frame rate (30 / 60 / 90 / 120 FPS)",
+                    None,
+                    fps_val,
+                    UiAction::CycleFps,
+                ),
+                (
+                    "Video Encoder Bitrate",
+                    "H.264 stream bitrate over USB (12 / 16 / 24 / 36 / 48 Mbps)",
+                    None,
+                    br_val,
+                    UiAction::CycleBitrate,
+                ),
+                (
+                    "Bitrate Control Mode",
+                    "Constant Bitrate (CBR) for lowest latency vs Variable (VBR)",
+                    None,
+                    cbr_val.to_string(),
+                    UiAction::ToggleCbr,
+                ),
+                (
+                    "Phone Microphone (Voice Isolation DSP)",
+                    "Capture voice-isolated phone mic audio alongside game sound",
+                    Some(s.mic_enabled),
+                    String::new(),
+                    UiAction::ToggleMic,
+                ),
+                (
+                    "PC Speaker Audio Playback",
+                    "Play phone & game audio live through your laptop speakers",
+                    Some(s.pc_audio_enabled),
+                    String::new(),
+                    UiAction::TogglePcAudio,
+                ),
+                (
+                    "Auto-Connect on USB Plug",
+                    "Automatically start mirroring when an Android or iOS device is plugged in",
+                    Some(s.auto_connect_usb),
+                    String::new(),
+                    UiAction::ToggleAutoConnect,
+                ),
+                (
+                    "AirPlay Receiver (iOS Wireless)",
+                    "Listen for iPhone/iPad Screen Mirroring over Wi-Fi ('Mobile Mirror')",
+                    Some(s.airplay_enabled),
+                    String::new(),
+                    UiAction::ToggleAirPlay,
+                ),
+                (
+                    "Auto-Record on Mirror Start",
+                    "Automatically start lossless MP4 recording when mirroring begins",
+                    Some(s.auto_record),
+                    String::new(),
+                    UiAction::ToggleAutoRecord,
+                ),
+                (
+                    "Always on Top Window",
+                    "Keep Mobile Mirror window pinned above other desktop apps",
+                    Some(s.always_on_top),
+                    String::new(),
+                    UiAction::ToggleAlwaysOnTop,
+                ),
+                (
+                    "Hardware Video Decoder",
+                    "GPU decoding acceleration backend (NVDEC / D3D11VA / DXVA2)",
+                    None,
+                    s.hw_backend.label().to_string(),
+                    UiAction::CycleHwBackend,
+                ),
+            ];
+
+            let start_y = tab_y + tab_h + 12.0;
+            let avail_h = (card_y + card_h - start_y - 10.0).max(260.0);
+            let gap = if avail_h < 420.0 { 3.0 } else { 5.0 };
+            let row_h = ((avail_h - gap * 9.0) / 10.0).clamp(24.0, 50.0);
+            let compact_rows = row_h < 38.0;
+
+            for (idx, (title, desc, toggle_state, badge_text, action)) in
+                rows.into_iter().enumerate()
+            {
+                let ry = start_y + idx as f32 * (row_h + gap);
+                let row_rect = SDL_FRect {
+                    x: rx,
+                    y: ry,
+                    w: rw,
+                    h: row_h,
+                };
+                let is_hov = point_in_rect(mx, my, &row_rect);
+                let bg = if is_hov {
+                    PILL_NEUTRAL_HOVER
+                } else {
+                    BANNER_USB_BG
+                };
+                canvas.draw_rounded_card(
+                    rx,
+                    ry,
+                    rw,
+                    row_h,
+                    8.0,
+                    bg,
+                    CARD_BORDER,
+                    1.0,
+                    SHADOW_SLATE,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                );
+
+                let right_reserve = if toggle_state.is_some() { 72.0 } else { 148.0 };
+                let fit_title = canvas.fit_text_to_width(
+                    title,
+                    (rw - right_reserve).max(80.0),
+                    13.0,
+                    FontWeight::Semibold,
+                );
+                if compact_rows {
+                    let t_cap = canvas.cap_height(12.5, FontWeight::Semibold);
+                    canvas.draw_text_baseline(
+                        &fit_title,
+                        rx + 12.0,
+                        ry + (row_h + t_cap) * 0.5,
+                        12.5,
+                        FontWeight::Semibold,
+                        TEXT_PRIMARY,
+                        1.0,
+                    );
+                } else {
+                    canvas.draw_text(
+                        &fit_title,
+                        rx + 14.0,
+                        ry + (row_h - 34.0) * 0.5,
+                        13.0,
+                        FontWeight::Semibold,
+                        TEXT_PRIMARY,
+                        1.0,
+                    );
+                    let fit_desc = canvas.fit_text_to_width(
+                        desc,
+                        (rw - right_reserve).max(80.0),
+                        11.4,
+                        FontWeight::Regular,
+                    );
+                    canvas.draw_text(
+                        &fit_desc,
+                        rx + 14.0,
+                        ry + (row_h - 34.0) * 0.5 + 18.0,
+                        11.4,
+                        FontWeight::Regular,
+                        TEXT_SECONDARY,
+                        1.0,
+                    );
+                }
+
+                if let Some(is_on) = toggle_state {
+                    let th = if compact_rows { 18.0 } else { 22.0 };
+                    let tw = if compact_rows { 34.0 } else { 42.0 };
+                    canvas.draw_toggle_switch(
+                        rx + rw - tw - 14.0,
+                        ry + (row_h - th) * 0.5,
+                        tw,
+                        th,
+                        is_on,
+                        if is_hov { 1.0 } else { 0.0 },
+                    );
+                } else {
+                    let bw = (canvas.measure_text_width(&badge_text, 11.8, FontWeight::Semibold)
+                        + 20.0)
+                        .clamp(76.0, (rw * 0.42).max(76.0));
+                    let bh = if compact_rows { 22.0 } else { 26.0 };
+                    let pill_r = SDL_FRect {
+                        x: rx + rw - bw - 12.0,
+                        y: ry + (row_h - bh) * 0.5,
+                        w: bw,
+                        h: bh,
+                    };
+                    draw_small_pill(canvas, &pill_r, &badge_text, APPLE_BLUE_SOFT, APPLE_BLUE);
+                }
+
+                hit_zones.push(HitZone {
+                    rect: row_rect,
+                    action,
+                });
+            }
+        }
+        SettingsSection::HelpAbout => {
+            let content_y = tab_y + tab_h + 16.0;
+
+            // About Header Card
+            canvas.draw_rounded_card(
+                rx,
+                content_y,
+                rw,
+                68.0,
+                8.0,
+                BANNER_USB_BG,
+                CARD_BORDER,
+                1.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+            canvas.draw_app_brand_icon(rx + 14.0, content_y + 14.0, 40.0);
+            canvas.draw_text(
+                "Mobile Mirror  •  v0.1.0",
+                rx + 66.0,
+                content_y + 14.0,
+                14.5,
+                FontWeight::Bold,
+                TEXT_PRIMARY,
+                1.0,
+            );
+            let about_sub = canvas.fit_text_to_width(
+                "Ultra-low-latency Android (USB) & iOS (USB / AirPlay) screen mirroring & lossless MP4 recording",
+                rw - 82.0,
+                11.8,
+                FontWeight::Regular,
+            );
+            canvas.draw_text(
+                &about_sub,
+                rx + 66.0,
+                content_y + 37.0,
+                11.8,
+                FontWeight::Regular,
+                TEXT_SECONDARY,
+                1.0,
+            );
+
+            // Connection Guide Steps
+            let steps = [
+                (
+                    "Android (USB Debugging)",
+                    "Enable Developer Options -> USB Debugging, plug in via USB, and tap 'Allow'.",
+                ),
+                (
+                    "iPhone / iPad (USB Cable)",
+                    "Plug in your iPhone or iPad via USB and tap 'Trust This Computer' on the device.",
+                ),
+                (
+                    "iPhone / iPad (Wireless AirPlay)",
+                    "Open Control Center -> Screen Mirroring -> select 'Mobile Mirror' (keep AirPlay ON).",
+                ),
+                (
+                    "Keyboard Shortcuts",
+                    "F11: Toggle Fullscreen  •  F: Expand/Compact  •  R: Start/Stop Recording  •  M: Toggle Mic",
+                ),
+            ];
+
+            let steps_y = content_y + 82.0;
+            for (idx, (st_title, st_desc)) in steps.iter().enumerate() {
+                let sy = steps_y + idx as f32 * 64.0;
+                canvas.draw_rounded_card(
+                    rx,
+                    sy,
+                    rw,
+                    56.0,
+                    8.0,
+                    CARD_WHITE,
+                    CARD_BORDER,
+                    1.0,
+                    SHADOW_SLATE,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                );
+                canvas.draw_circle(rx + 22.0, sy + 28.0, 12.0, APPLE_BLUE_SOFT, 1.0);
+                let num = format!("{}", idx + 1);
+                let nw = canvas.measure_text_width(&num, 12.5, FontWeight::Bold);
+                let n_cap = canvas.cap_height(12.5, FontWeight::Bold);
+                canvas.draw_text_baseline(
+                    &num,
+                    rx + 22.0 - nw * 0.5,
+                    sy + 28.0 + n_cap * 0.5,
+                    12.5,
+                    FontWeight::Bold,
+                    APPLE_BLUE,
+                    1.0,
+                );
+
+                canvas.draw_text(
+                    st_title,
+                    rx + 44.0,
+                    sy + 9.0,
+                    13.2,
+                    FontWeight::Semibold,
+                    TEXT_PRIMARY,
+                    1.0,
+                );
+                let fit_d =
+                    canvas.fit_text_to_width(st_desc, rw - 56.0, 11.8, FontWeight::Regular);
+                canvas.draw_text(
+                    &fit_d,
+                    rx + 44.0,
+                    sy + 30.0,
+                    11.8,
+                    FontWeight::Regular,
+                    TEXT_SECONDARY,
+                    1.0,
+                );
+            }
+
+            // Engine Diagnostics Box
+            let diag_y = steps_y + 4.0 * 64.0 + 10.0;
+            canvas.draw_rounded_card(
+                rx,
+                diag_y,
+                rw,
+                114.0,
+                8.0,
+                BANNER_USB_BG,
+                BANNER_USB_BORDER,
+                1.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            );
+            canvas.draw_text(
+                "Engine Diagnostics",
+                rx + 16.0,
+                diag_y + 12.0,
+                13.5,
+                FontWeight::Semibold,
+                TEXT_PRIMARY,
+                1.0,
+            );
+            let diag1 = format!(
+                "• Connection: {} ({})  •  AirPlay: {}",
+                state.headline,
+                state
+                    .platform_label
+                    .or(state.device_serial)
+                    .unwrap_or("Waiting"),
+                if state.airplay_listening {
+                    "Listening"
+                } else if state.settings.airplay_enabled {
+                    "Enabled"
+                } else {
+                    "Off"
+                }
+            );
+            let diag2 = format!(
+                "• Stream Profile: {}  •  {} Mbps {}  •  {} FPS",
+                state.settings.quality.label(),
+                state.settings.bitrate_mbps,
+                if state.settings.cbr_mode { "CBR" } else { "VBR" },
+                state.settings.target_fps
+            );
+            let diag3 = format!(
+                "• Hardware Decoder: {}",
+                state.settings.hw_backend.label(),
+            );
+            canvas.draw_text(
+                &canvas.fit_text_to_width(&diag1, rw - 32.0, 12.0, FontWeight::Regular),
+                rx + 16.0,
+                diag_y + 38.0,
+                12.0,
+                FontWeight::Regular,
+                TEXT_BODY,
+                1.0,
+            );
+            canvas.draw_text(
+                &canvas.fit_text_to_width(&diag2, rw - 32.0, 12.0, FontWeight::Regular),
+                rx + 16.0,
+                diag_y + 60.0,
+                12.0,
+                FontWeight::Regular,
+                TEXT_BODY,
+                1.0,
+            );
+            canvas.draw_text(
+                &canvas.fit_text_to_width(&diag3, rw - 32.0, 12.0, FontWeight::Regular),
+                rx + 16.0,
+                diag_y + 82.0,
+                12.0,
+                FontWeight::Regular,
+                TEXT_BODY,
+                1.0,
+            );
+
+            // Check USB Device Now button
+            let btn_y = (diag_y + 126.0).min(card_y + card_h - 46.0);
+            let test_rect = SDL_FRect {
+                x: rx,
+                y: btn_y,
+                w: 196.0,
+                h: 38.0,
+            };
+            let test_bg = if point_in_rect(mx, my, &test_rect) {
+                BLUE_GRAD_HOVER_TOP
+            } else {
+                APPLE_BLUE
+            };
+            draw_small_pill(canvas, &test_rect, "Check USB Device Now", test_bg, CARD_WHITE);
+            hit_zones.push(HitZone {
+                rect: test_rect,
+                action: UiAction::StartMirroring,
+            });
+        }
+    }
 }
 
 fn draw_small_pill(canvas: &mut UiCanvas, rect: &SDL_FRect, label: &str, bg: Rgb, fg: Rgb) {
@@ -3471,11 +3866,12 @@ fn draw_live_toolbar_strip_with_Zones(
         action: UiAction::StopMirroring,
     });
 
-    // 2. Left Draggable Status Section: Green Live Dot + Title (if wide) + FPS badge
-    let dot_cx = 14.0;
-    canvas.draw_circle(dot_cx, cy, 4.6, LIVE_GREEN, 1.0);
+    // 2. Left Draggable Status Section: Brand Icon + Green Live Dot + Title (if wide) + FPS badge
+    canvas.draw_app_brand_icon(8.0, cy - 11.0, 22.0);
+    let dot_cx = 37.0;
+    canvas.draw_circle(dot_cx, cy, 4.4, LIVE_GREEN, 1.0);
 
-    let mut cur_x = 24.0;
+    let mut cur_x = 46.0;
     if bar_w >= 540.0 {
         let title_cap = canvas.cap_height(TOOLBAR_TITLE_SIZE, FontWeight::Semibold);
         canvas.draw_text_baseline(
@@ -3581,6 +3977,8 @@ pub fn draw_startup_screen_canvas(
         is_warning,
         is_mirroring: false,
         device_serial: None,
+        platform_label: None,
+        airplay_listening: false,
         is_recording: false,
         rec_elapsed_secs: 0,
         last_saved_recording: None,
@@ -3589,9 +3987,18 @@ pub fn draw_startup_screen_canvas(
         fps: 60,
         recordings: &[],
         status_toast: None,
+        thumbnails: None,
+        recordings_page: 0,
     };
     let mut zones = Vec::new();
-    let _ = draw_bento_dashboard_canvas(canvas, &mut zones, -1000.0, -1000.0, &state);
+    let _ = draw_bento_dashboard_canvas(
+        canvas,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        &state,
+        SettingsSection::Preferences,
+    );
 }
 
 /// Renders and saves lossless PNG preview snapshots of the "Mobile Mirror" Bento Dashboard states
@@ -3613,6 +4020,8 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         is_warning: false,
         is_mirroring: false,
         device_serial: None,
+        platform_label: None,
+        airplay_listening: false,
         is_recording: false,
         rec_elapsed_secs: 0,
         last_saved_recording: None,
@@ -3621,12 +4030,21 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         fps: 60,
         recordings: &[],
         status_toast: None,
+        thumbnails: None,
+        recordings_page: 0,
     };
-    let _ = draw_bento_dashboard_canvas(&mut canvas_home, &mut zones, -1000.0, -1000.0, &state_home);
+    let _ = draw_bento_dashboard_canvas(
+        &mut canvas_home,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        &state_home,
+        SettingsSection::Preferences,
+    );
     canvas_home.save_png(&dir.join("ui_dashboard_home.png"))?;
     canvas_home.save_png(&dir.join("ui_startup_waiting.png"))?;
 
-    // 2. Settings Tab Preview (1024 x 698)
+    // 2. Settings Tab Preview (Preferences)
     let mut canvas_settings = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
     let state_settings = DashboardViewState {
         active_tab: NavTab::Settings,
@@ -3637,6 +4055,8 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         is_warning: false,
         is_mirroring: false,
         device_serial: None,
+        platform_label: None,
+        airplay_listening: false,
         is_recording: false,
         rec_elapsed_secs: 0,
         last_saved_recording: None,
@@ -3645,6 +4065,8 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         fps: 60,
         recordings: &[],
         status_toast: None,
+        thumbnails: None,
+        recordings_page: 0,
     };
     let _ = draw_bento_dashboard_canvas(
         &mut canvas_settings,
@@ -3652,13 +4074,14 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         -1000.0,
         -1000.0,
         &state_settings,
+        SettingsSection::Preferences,
     );
     canvas_settings.save_png(&dir.join("ui_dashboard_settings.png"))?;
 
-    // 3. About & Help Tab Preview (1024 x 698)
+    // 3. Settings -> Help & About Preview
     let mut canvas_about = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
     let state_about = DashboardViewState {
-        active_tab: NavTab::About,
+        active_tab: NavTab::Settings,
         settings: &default_settings,
         headline: "Connect your phone via USB",
         subtext: "Make sure USB debugging is enabled on your Android device.",
@@ -3666,6 +4089,8 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         is_warning: false,
         is_mirroring: false,
         device_serial: None,
+        platform_label: None,
+        airplay_listening: false,
         is_recording: false,
         rec_elapsed_secs: 0,
         last_saved_recording: None,
@@ -3674,6 +4099,8 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         fps: 60,
         recordings: &[],
         status_toast: None,
+        thumbnails: None,
+        recordings_page: 0,
     };
     let _ = draw_bento_dashboard_canvas(
         &mut canvas_about,
@@ -3681,6 +4108,7 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         -1000.0,
         -1000.0,
         &state_about,
+        SettingsSection::HelpAbout,
     );
     canvas_about.save_png(&dir.join("ui_dashboard_about.png"))?;
 
@@ -3700,6 +4128,79 @@ pub fn export_preview_snapshots(dir: &Path) -> io::Result<()> {
         false,
     );
     canvas_toolbar.save_png(&dir.join("ui_compact_phone_toolbar.png"))?;
+
+    // 5. Recordings Tab Orderly Grid Preview
+    let mut canvas_rec = UiCanvas::new(DASHBOARD_WIDTH as usize, DASHBOARD_HEIGHT as usize);
+    let rec_path1 = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("recordings")
+        .join("recording_20261118_174859.mp4");
+    let sample_rec1 = RecordingEntry {
+        file_name: "recording_20261118_174859.mp4".to_string(),
+        full_path: rec_path1.clone(),
+        size_bytes: 163390359,
+        modified_epoch_secs: 1731930539,
+    };
+    let rec_path2 = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("recordings")
+        .join("part2.mp4");
+    let sample_rec2 = RecordingEntry {
+        file_name: "part2.mp4".to_string(),
+        full_path: rec_path2.clone(),
+        size_bytes: 84200000,
+        modified_epoch_secs: 1731920000,
+    };
+    let rec_path3 = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("recordings")
+        .join("part3.mp4");
+    let sample_rec3 = RecordingEntry {
+        file_name: "part3.mp4".to_string(),
+        full_path: rec_path3.clone(),
+        size_bytes: 65100000,
+        modified_epoch_secs: 1731910000,
+    };
+    let recs_list = vec![sample_rec1, sample_rec2, sample_rec3];
+
+    let mut thumb_map = std::collections::HashMap::new();
+    if let Some(real_thumb) = crate::thumbnail::extract_video_thumbnail(&rec_path1, 240, 136) {
+        thumb_map.insert(rec_path1, real_thumb.clone());
+        thumb_map.insert(rec_path2, real_thumb.clone());
+        thumb_map.insert(rec_path3, real_thumb);
+    }
+
+    let state_rec = DashboardViewState {
+        active_tab: NavTab::Recordings,
+        settings: &default_settings,
+        headline: "Saved Recordings",
+        subtext: "Live USB screen recordings",
+        is_connecting: false,
+        is_warning: false,
+        is_mirroring: false,
+        device_serial: None,
+        platform_label: None,
+        airplay_listening: false,
+        is_recording: false,
+        rec_elapsed_secs: 0,
+        last_saved_recording: None,
+        stream_width: 0,
+        stream_height: 0,
+        fps: 60,
+        recordings: &recs_list,
+        status_toast: None,
+        thumbnails: Some(&thumb_map),
+        recordings_page: 0,
+    };
+    let _ = draw_bento_dashboard_canvas(
+        &mut canvas_rec,
+        &mut zones,
+        -1000.0,
+        -1000.0,
+        &state_rec,
+        SettingsSection::Preferences,
+    );
+    canvas_rec.save_png(&dir.join("ui_dashboard_recordings_gallery.png"))?;
 
     Ok(())
 }
@@ -3820,7 +4321,7 @@ mod tests {
     #[test]
     fn test_export_ui_snapshots() {
         let out_dir = Path::new(
-            r"C:\Users\asus\.gemini\antigravity\brain\6c58fc51-de79-473e-8077-19f27f6113b8\scratch",
+            r"C:\Users\asus\.gemini\antigravity\brain\b2d7cb42-2db3-4536-ab53-6aadb7033689\scratch",
         );
         export_preview_snapshots(out_dir).expect("Failed to export UI preview snapshots");
     }

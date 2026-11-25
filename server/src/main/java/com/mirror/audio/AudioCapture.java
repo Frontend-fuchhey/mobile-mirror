@@ -54,6 +54,7 @@ public final class AudioCapture implements Closeable {
     private final Object micLock = new Object();
 
     private AudioRecord systemRecord;
+    private Object registeredAudioPolicy;
     private boolean needsPhoneSpeakerPassthrough = false;
     private AudioTrack phoneSpeakerTrack;
     private AudioRecord micRecord;
@@ -79,7 +80,8 @@ public final class AudioCapture implements Closeable {
             }
 
             captureThread = new Thread(() -> captureLoop(streamer), "audio-capture");
-            captureThread.setPriority(Thread.MAX_PRIORITY);
+            captureThread.setDaemon(true);
+            captureThread.setPriority(Thread.NORM_PRIORITY + 1);
             captureThread.start();
         } catch (Throwable t) {
             System.err.println("[MirrorServer] Audio capture startup notice: " + t.getMessage());
@@ -129,6 +131,15 @@ public final class AudioCapture implements Closeable {
 
         try {
             while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+                if (systemRecord == null && !micEnabled.get()) {
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ignored) {
+                        break;
+                    }
+                    continue;
+                }
+
                 boolean hasSys = false;
                 boolean hasMic = false;
 
@@ -204,6 +215,8 @@ public final class AudioCapture implements Closeable {
                     break;
                 }
             }
+        } catch (Throwable t) {
+            System.err.println("[MirrorServer] Audio capture loop notice: " + t.getMessage());
         } finally {
             try {
                 aacEncoder.stop();
@@ -554,7 +567,7 @@ public final class AudioCapture implements Closeable {
         }
     }
 
-    private static AudioRecord buildAudioPolicyLoopbackRender(int[] usages, boolean privilegedFlags) throws Exception {
+    private AudioRecord buildAudioPolicyLoopbackRender(int[] usages, boolean privilegedFlags) throws Exception {
         Class<?> mixingRuleClass = Class.forName("android.media.audiopolicy.AudioMixingRule");
         Class<?> ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule$Builder");
         Object ruleBuilder = ruleBuilderClass.getConstructor().newInstance();
@@ -637,8 +650,41 @@ public final class AudioCapture implements Closeable {
             }
         }
 
+        this.registeredAudioPolicy = audioPolicy;
         Method createSinkMethod = audioPolicyClass.getMethod("createAudioRecordSink", audioMixClass);
         return (AudioRecord) createSinkMethod.invoke(audioPolicy, audioMix);
+    }
+
+    private void unregisterAudioPolicyQuietly() {
+        Object policy = this.registeredAudioPolicy;
+        this.registeredAudioPolicy = null;
+        if (policy == null) {
+            return;
+        }
+        try {
+            Class<?> audioPolicyClass = Class.forName("android.media.audiopolicy.AudioPolicy");
+            Object audioManager = FakeContext.get().getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager != null) {
+                try {
+                    Method unregAsync = AudioManager.class.getDeclaredMethod("unregisterAudioPolicyAsync", audioPolicyClass);
+                    unregAsync.setAccessible(true);
+                    unregAsync.invoke(audioManager, policy);
+                    return;
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Method unreg = AudioManager.class.getDeclaredMethod("unregisterAudioPolicy", audioPolicyClass);
+                    unreg.setAccessible(true);
+                    unreg.invoke(audioManager, policy);
+                    return;
+                } catch (Throwable ignored) {
+                }
+            }
+            Method unregStatic = AudioManager.class.getDeclaredMethod("unregisterAudioPolicyAsyncStatic", audioPolicyClass);
+            unregStatic.setAccessible(true);
+            unregStatic.invoke(null, policy);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
@@ -673,6 +719,7 @@ public final class AudioCapture implements Closeable {
             }
             systemRecord = null;
         }
+        unregisterAudioPolicyQuietly();
     }
 
     /**

@@ -166,6 +166,17 @@ pub struct FfmpegApi {
         unsafe extern "C" fn(*mut AVFormatContext, *mut AVPacket) -> c_int,
     pub av_write_trailer: unsafe extern "C" fn(*mut AVFormatContext) -> c_int,
     pub avformat_free_context: unsafe extern "C" fn(*mut AVFormatContext),
+    pub avformat_open_input: unsafe extern "C" fn(
+        *mut *mut AVFormatContext,
+        *const c_char,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> c_int,
+    pub avformat_find_stream_info:
+        unsafe extern "C" fn(*mut AVFormatContext, *mut *mut c_void) -> c_int,
+    pub av_read_frame: unsafe extern "C" fn(*mut AVFormatContext, *mut AVPacket) -> c_int,
+    pub avformat_close_input: unsafe extern "C" fn(*mut *mut AVFormatContext),
+    pub av_seek_frame: unsafe extern "C" fn(*mut AVFormatContext, c_int, i64, c_int) -> c_int,
 
     // libavcodec
     pub avcodec_find_decoder: unsafe extern "C" fn(c_int) -> *const AVCodec,
@@ -174,6 +185,8 @@ pub struct FfmpegApi {
     pub avcodec_free_context: unsafe extern "C" fn(*mut *mut c_void),
     pub avcodec_open2:
         unsafe extern "C" fn(*mut c_void, *const AVCodec, *mut *mut c_void) -> c_int,
+    pub avcodec_parameters_to_context:
+        unsafe extern "C" fn(*mut c_void, *const AVCodecParameters) -> c_int,
     pub avcodec_send_packet: unsafe extern "C" fn(*mut c_void, *const AVPacket) -> c_int,
     pub avcodec_receive_frame: unsafe extern "C" fn(*mut c_void, *mut AVFrame) -> c_int,
     pub av_packet_alloc: unsafe extern "C" fn() -> *mut AVPacket,
@@ -253,12 +266,18 @@ impl FfmpegApi {
                 av_interleaved_write_frame: avformat.get_sym("av_interleaved_write_frame")?,
                 av_write_trailer: avformat.get_sym("av_write_trailer")?,
                 avformat_free_context: avformat.get_sym("avformat_free_context")?,
+                avformat_open_input: avformat.get_sym("avformat_open_input")?,
+                avformat_find_stream_info: avformat.get_sym("avformat_find_stream_info")?,
+                av_read_frame: avformat.get_sym("av_read_frame")?,
+                avformat_close_input: avformat.get_sym("avformat_close_input")?,
+                av_seek_frame: avformat.get_sym("av_seek_frame")?,
 
                 avcodec_find_decoder: avcodec.get_sym("avcodec_find_decoder")?,
                 avcodec_find_decoder_by_name: avcodec.get_sym("avcodec_find_decoder_by_name")?,
                 avcodec_alloc_context3: avcodec.get_sym("avcodec_alloc_context3")?,
                 avcodec_free_context: avcodec.get_sym("avcodec_free_context")?,
                 avcodec_open2: avcodec.get_sym("avcodec_open2")?,
+                avcodec_parameters_to_context: avcodec.get_sym("avcodec_parameters_to_context")?,
                 avcodec_send_packet: avcodec.get_sym("avcodec_send_packet")?,
                 avcodec_receive_frame: avcodec.get_sym("avcodec_receive_frame")?,
                 av_packet_alloc: avcodec.get_sym("av_packet_alloc")?,
@@ -279,6 +298,65 @@ impl FfmpegApi {
                 _avcodec: avcodec,
                 _avformat: avformat,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_ffmpeg_input_symbols() {
+        unsafe {
+            let avformat = DynLib::open_any(&["avformat-63.dll"]).expect("open avformat");
+            let sym_cfg: Result<unsafe extern "C" fn() -> *const std::os::raw::c_char, _> = avformat.get_sym("avformat_configuration");
+            if let Ok(cfg_fn) = sym_cfg {
+                let cfg_str = std::ffi::CStr::from_ptr(cfg_fn()).to_string_lossy();
+                println!("avformat config: {}", cfg_str);
+            }
+            let sym_demux: Result<unsafe extern "C" fn(*mut *const std::os::raw::c_void) -> *const std::os::raw::c_void, _> = avformat.get_sym("av_demuxer_iterate");
+            if let Ok(demux_fn) = sym_demux {
+                let mut opaque: *const std::os::raw::c_void = std::ptr::null();
+                let mut count = 0;
+                while !demux_fn(&mut opaque).is_null() {
+                    count += 1;
+                }
+                println!("Total demuxers available: {}", count);
+            }
+            let sym_open: Result<unsafe extern "C" fn(), _> = avformat.get_sym("avformat_open_input");
+            println!("avformat_open_input found: {}", sym_open.is_ok());
+            assert!(sym_open.is_ok());
+
+            let sym_find: Result<unsafe extern "C" fn(), _> = avformat.get_sym("avformat_find_stream_info");
+            println!("avformat_find_stream_info found: {}", sym_find.is_ok());
+            assert!(sym_find.is_ok());
+
+            let sym_read: Result<unsafe extern "C" fn(), _> = avformat.get_sym("av_read_frame");
+            println!("av_read_frame found: {}", sym_read.is_ok());
+            assert!(sym_read.is_ok());
+
+            let sym_close: Result<unsafe extern "C" fn(), _> = avformat.get_sym("avformat_close_input");
+            println!("avformat_close_input found: {}", sym_close.is_ok());
+            assert!(sym_close.is_ok());
+
+            let avcodec = DynLib::open_any(&["avcodec-63.dll"]).expect("open avcodec");
+            let sym_seek: Result<unsafe extern "C" fn(), _> = avformat.get_sym("av_seek_frame");
+            println!("av_seek_frame found: {}", sym_seek.is_ok());
+            assert!(sym_seek.is_ok());
+
+            let sym_par: Result<unsafe extern "C" fn(), _> = avcodec.get_sym("avcodec_parameters_to_context");
+            println!("avcodec_parameters_to_context found: {}", sym_par.is_ok());
+            assert!(sym_par.is_ok());
+        }
+
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("recordings").join("recording_20261118_174859.mp4");
+        if sample_path.exists() {
+            println!("Testing thumbnail extraction from {}", sample_path.display());
+            let thumb = crate::thumbnail::extract_video_thumbnail(&sample_path, 240, 136);
+            println!("Extracted thumbnail: {:?}", thumb.is_some());
+            assert!(thumb.is_some());
         }
     }
 }

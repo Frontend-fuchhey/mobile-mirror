@@ -1,7 +1,21 @@
 use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
+use crate::thumbnail::VideoThumbnail;
 use std::fs;
 use std::io;
 use std::path::Path;
+
+/// Pre-filtered HighQualityBicubic BGRA/ARGB mipmap pyramid (`256`, `128`, `64`, `48`, `32`)
+/// of the official "Glossy Laptop Mirroring App Icon".
+const APP_ICON_MIPS: &[u8] = include_bytes!("../assets/app_icon_mips.bin");
+
+/// Returns the `256x256` `0xAARRGGBB` pixel buffer of the official app icon for `SDL_SetWindowIcon`.
+pub fn app_icon_argb_256() -> Vec<u32> {
+    let mut out = Vec::with_capacity(256 * 256);
+    for chunk in APP_ICON_MIPS[..256 * 256 * 4].chunks_exact(4) {
+        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    out
+}
 
 /// Color in sRGB `(R, G, B)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,45 +33,45 @@ impl Rgb {
 }
 
 // ============================================================================
-// Design System Palette (Impeccable + UI/UX Pro Max — Cool Tinted Light Mode)
+// Design System Palette (Clean Windows 11-Inspired White & Subtle Light-Blue)
 // ============================================================================
-pub const BG_ALABASTER: Rgb = Rgb(243, 246, 253); // #F3F6FD Main Dashboard Workspace Background
-pub const BG_HEADER: Rgb = Rgb(246, 248, 255); // #F6F8FF Top Title Bar Surface
-pub const BG_SIDEBAR: Rgb = Rgb(246, 249, 255); // #F6F9FF Left Navigation Sidebar Surface
-pub const CARD_WHITE: Rgb = Rgb(255, 255, 255); // #FFFFFF Pure Elevated Card Surface
-pub const BORDER_SUBTLE: Rgb = Rgb(226, 232, 244); // #E2E8F4 Crisp 1px Cool-Tinted Hairline
-pub const CARD_BORDER: Rgb = Rgb(234, 239, 249); // #EAEFF9 Subtle Elevated Card Border
-pub const SHADOW_SLATE: Rgb = Rgb(15, 23, 42); // #0F172A Tinted Deep Slate Drop Shadow
+pub const BG_ALABASTER: Rgb = Rgb(255, 255, 255); // #FFFFFF Clean White Main Workspace Background
+pub const BG_HEADER: Rgb = Rgb(248, 250, 253); // #F8FAFD Subtle Light-Blue Top Title Bar
+pub const BG_SIDEBAR: Rgb = Rgb(244, 247, 252); // #F4F7FC Subtle Light-Blue Left Navigation Sidebar
+pub const CARD_WHITE: Rgb = Rgb(255, 255, 255); // #FFFFFF Pure Surface
+pub const BORDER_SUBTLE: Rgb = Rgb(228, 234, 243); // #E4EAF3 Crisp 1px Cool Hairline
+pub const CARD_BORDER: Rgb = Rgb(226, 232, 242); // #E2E8F2 Subtle Surface Border
+pub const SHADOW_SLATE: Rgb = Rgb(15, 23, 42); // #0F172A Slate Shadow Base
 
-// Brand & Accent Blues
-pub const APPLE_BLUE: Rgb = Rgb(21, 101, 240); // #1565F0 Primary Brand Blue (Active Nav, Auto Pill, Links)
-pub const BLUE_GRAD_TOP: Rgb = Rgb(38, 114, 246); // #2672F6 Start Mirroring Button Top Gradient
-pub const BLUE_GRAD_BOT: Rgb = Rgb(12, 85, 226); // #0C55E2 Start Mirroring Button Bottom Gradient
-pub const BLUE_GRAD_HOVER_TOP: Rgb = Rgb(28, 102, 236); // #1C66EC Hover Top
-pub const BLUE_GRAD_HOVER_BOT: Rgb = Rgb(8, 72, 206); // #0848CE Hover Bottom
-pub const APPLE_BLUE_SOFT: Rgb = Rgb(224, 235, 255); // #E0EBFF Active Sidebar Pill Fill
-pub const APPLE_BLUE_HOVER: Rgb = Rgb(210, 226, 255); // #D2E2FF Active Pill Hover
+// Brand & Accent Blues (#246BFD Primary Accent)
+pub const APPLE_BLUE: Rgb = Rgb(36, 107, 253); // #246BFD Primary Accent Blue
+pub const BLUE_GRAD_TOP: Rgb = Rgb(36, 107, 253); // #246BFD Flat Primary Blue
+pub const BLUE_GRAD_BOT: Rgb = Rgb(36, 107, 253); // #246BFD Flat Primary Blue
+pub const BLUE_GRAD_HOVER_TOP: Rgb = Rgb(27, 94, 232); // #1B5EE8 Hover Primary Blue
+pub const BLUE_GRAD_HOVER_BOT: Rgb = Rgb(27, 94, 232); // #1B5EE8 Hover Primary Blue
+pub const APPLE_BLUE_SOFT: Rgb = Rgb(235, 242, 255); // #EBF2FF Subtle Light-Blue Active State
+pub const APPLE_BLUE_HOVER: Rgb = Rgb(222, 234, 255); // #DEEAFF Subtle Light-Blue Hover
 
-// Neutral Tinted Controls & Banners
-pub const PILL_NEUTRAL: Rgb = Rgb(240, 244, 253); // #F0F4FD Quick Tools Row & Quality Track Fill
-pub const PILL_NEUTRAL_HOVER: Rgb = Rgb(228, 235, 250); // #E4EBFA Quick Tools Row Hover Fill
-pub const BANNER_USB_BG: Rgb = Rgb(236, 240, 253); // #ECF0FD Bottom "Connect via USB" Banner Fill
-pub const BANNER_USB_BORDER: Rgb = Rgb(222, 229, 248); // #DEE5F8 Bottom Banner Border
-pub const BADGE_OFF_BG: Rgb = Rgb(236, 240, 249); // #ECF0F9 "Off" Badge Fill
+// Neutral Tinted Controls & Surfaces
+pub const PILL_NEUTRAL: Rgb = Rgb(242, 245, 250); // #F2F5FA Subtle Neutral Control Surface
+pub const PILL_NEUTRAL_HOVER: Rgb = Rgb(230, 236, 246); // #E6ECF6 Subtle Neutral Hover
+pub const BANNER_USB_BG: Rgb = Rgb(245, 248, 254); // #F5F8FE Subtle Light-Blue Info Strip
+pub const BANNER_USB_BORDER: Rgb = Rgb(224, 232, 246); // #E0E8F6 Info Strip Border
+pub const BADGE_OFF_BG: Rgb = Rgb(237, 241, 248); // #EDF1F8 "Off" Badge Fill
 
-// Status & Semantic Colors
-pub const LIVE_GREEN: Rgb = Rgb(28, 184, 84); // #1CB854 "Ready" Green Status Dot & Label
-pub const LIVE_GREEN_SOFT: Rgb = Rgb(232, 249, 238); // #E8F9EE Soft Green Badge Fill
-pub const WARNING_AMBER: Rgb = Rgb(230, 126, 12); // #E67E0C Warning / Auth Needed
+// Status & Semantic Colors (Red reserved strictly for Recording controls/indicators)
+pub const LIVE_GREEN: Rgb = Rgb(22, 163, 74); // #16A34A Connected / Ready Indicator
+pub const LIVE_GREEN_SOFT: Rgb = Rgb(232, 249, 238); // #E8F9EE Soft Green Fill
+pub const WARNING_AMBER: Rgb = Rgb(217, 119, 6); // #D97706 Warning / Auth Needed
 pub const WARNING_AMBER_SOFT: Rgb = Rgb(254, 243, 226); // #FEF3E2 Soft Warning Fill
-pub const ERROR_RED: Rgb = Rgb(232, 48, 56); // #E83038 Recording Red Dot & Active Timer
-pub const ERROR_BG: Rgb = Rgb(253, 232, 236); // #FDE8EC "Start Recording" Soft Rose Pill Fill
-pub const ERROR_BG_HOVER: Rgb = Rgb(250, 215, 222); // #FAD7DE "Start Recording" Hover Fill
+pub const ERROR_RED: Rgb = Rgb(220, 38, 38); // #DC2626 Recording Indicator & Active Timer
+pub const ERROR_BG: Rgb = Rgb(254, 236, 238); // #FEECEE Recording Button Fill
+pub const ERROR_BG_HOVER: Rgb = Rgb(252, 218, 222); // #FCDADE Recording Button Hover
 
-// Typography Ink Hierarchy (WCAG AAA/AA Compliant — High-Contrast Readable Slate)
-pub const TEXT_PRIMARY: Rgb = Rgb(15, 23, 42); // #0F172A Primary Display & Heading Ink
-pub const TEXT_BODY: Rgb = Rgb(30, 41, 59); // #1E293B Navigation & Control Label Ink
-pub const TEXT_SECONDARY: Rgb = Rgb(64, 78, 102); // #404E66 Subtitles, Captions & Muted Meta
+// Typography Ink Hierarchy (Dark Navy Primary + Muted Grey Secondary)
+pub const TEXT_PRIMARY: Rgb = Rgb(15, 23, 42); // #0F172A Dark Navy Heading & Primary Ink
+pub const TEXT_BODY: Rgb = Rgb(30, 41, 59); // #1E293B Dark Navy Control Label Ink
+pub const TEXT_SECONDARY: Rgb = Rgb(100, 116, 139); // #64748B Muted Grey Secondary Text
 
 /// Typographic weight matching Windows Segoe UI / Apple SF font families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,57 +719,95 @@ impl UiCanvas {
     // Custom Vector Icon Suite Matching Reference Screenshot
     // ========================================================================
 
-    /// Renders the top-left rounded-square Blue App Icon (`30x30`, `r=8`) with white smartphone + cast symbol.
+    /// Renders the official "Glossy Laptop Mirroring App Icon" at `(x, y)` with width/height `size`
+    /// using mipmap-selected premultiplied-alpha bilinear filtering.
     pub fn draw_app_brand_icon(&mut self, x: f32, y: f32, size: f32) {
-        self.draw_gradient_rounded_card(
-            x,
-            y,
-            size,
-            size,
-            size * 0.27,
-            Rgb(78, 156, 252),
-            Rgb(23, 102, 238),
-            Rgb(54, 132, 246),
-            0.8,
-            APPLE_BLUE,
-            0.18,
-            6.0,
-            2.0,
-            1.0,
-        );
+        let s = self.scale;
+        let px_x = x * s;
+        let px_y = y * s;
+        let px_size = (size * s).max(1.0);
 
-        let cx = x + size * 0.5;
-        let cy = y + size * 0.5;
-        // White phone frame inside icon
-        let pw = size * 0.42;
-        let ph = size * 0.66;
-        let px = cx - pw * 0.36;
-        let py = cy - ph * 0.5;
-        self.draw_rounded_stroke(px, py, pw, ph, 2.6, 1.7, CARD_WHITE, 0.96);
-        // Top speaker dot
-        self.draw_capsule_line(cx - 0.5, py + 2.5, cx + 1.8, py + 2.5, 1.3, CARD_WHITE, 0.9);
-        // Bottom home dot
-        self.draw_circle(px + pw * 0.5, py + ph - 2.6, 1.0, CARD_WHITE, 0.9);
+        // Select optimal pre-filtered mipmap level:
+        // Offsets in APP_ICON_MIPS:
+        // 256x256: 0       (len 262144)
+        // 128x128: 262144  (len 65536)
+        //  64x64:  327680  (len 16384)
+        //  48x48:  344064  (len 9216)
+        //  32x32:  353280  (len 4096)
+        let (mip_dim, mip_offset): (usize, usize) = if px_size <= 34.0 {
+            (32, 353_280)
+        } else if px_size <= 52.0 {
+            (48, 344_064)
+        } else if px_size <= 72.0 {
+            (64, 327_680)
+        } else if px_size <= 144.0 {
+            (128, 262_144)
+        } else {
+            (256, 0)
+        };
 
-        // Cast / mirror badge overlapping left side of phone frame
-        let bx = px - 3.2;
-        let by = cy - 3.2;
-        self.draw_rounded_card(
-            bx,
-            by,
-            6.4,
-            6.4,
-            1.8,
-            Rgb(42, 122, 246),
-            CARD_WHITE,
-            1.3,
-            CARD_WHITE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-        self.draw_circle(bx + 2.2, by + 4.2, 0.9, CARD_WHITE, 1.0);
+        let mip_bytes = &APP_ICON_MIPS[mip_offset..mip_offset + mip_dim * mip_dim * 4];
+        let x0 = px_x.floor().max(0.0) as usize;
+        let y0 = px_y.floor().max(0.0) as usize;
+        let x1 = (px_x + px_size).ceil().min(self.width as f32) as usize;
+        let y1 = (px_y + px_size).ceil().min(self.height as f32) as usize;
+
+        let sample_premul = |tx: isize, ty: isize| -> (f32, f32, f32, f32) {
+            if tx < 0 || ty < 0 || tx >= mip_dim as isize || ty >= mip_dim as isize {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let idx = (ty as usize * mip_dim + tx as usize) * 4;
+            let b = mip_bytes[idx] as f32;
+            let g = mip_bytes[idx + 1] as f32;
+            let r = mip_bytes[idx + 2] as f32;
+            let a = (mip_bytes[idx + 3] as f32) * (1.0 / 255.0);
+            (r * a, g * a, b * a, a)
+        };
+
+        let dim_f = mip_dim as f32;
+        for iy in y0..y1 {
+            let v = ((iy as f32 + 0.5 - px_y) / px_size) * dim_f - 0.5;
+            let ty0 = v.floor() as isize;
+            let fy = v - (ty0 as f32);
+            let inv_fy = 1.0 - fy;
+            let row_off = iy * self.width;
+
+            for ix in x0..x1 {
+                let u = ((ix as f32 + 0.5 - px_x) / px_size) * dim_f - 0.5;
+                let tx0 = u.floor() as isize;
+                let fx = u - (tx0 as f32);
+                let inv_fx = 1.0 - fx;
+
+                let w00 = inv_fx * inv_fy;
+                let w10 = fx * inv_fy;
+                let w01 = inv_fx * fy;
+                let w11 = fx * fy;
+
+                let p00 = sample_premul(tx0, ty0);
+                let p10 = sample_premul(tx0 + 1, ty0);
+                let p01 = sample_premul(tx0, ty0 + 1);
+                let p11 = sample_premul(tx0 + 1, ty0 + 1);
+
+                let af = (w00 * p00.3 + w10 * p10.3 + w01 * p01.3 + w11 * p11.3).clamp(0.0, 1.0);
+                if af <= 0.002 {
+                    continue;
+                }
+                let pr = w00 * p00.0 + w10 * p10.0 + w01 * p01.0 + w11 * p11.0;
+                let pg = w00 * p00.1 + w10 * p10.1 + w01 * p01.1 + w11 * p11.1;
+                let pb = w00 * p00.2 + w10 * p10.2 + w01 * p01.2 + w11 * p11.2;
+
+                let dst = self.pixels[row_off + ix];
+                let dr = ((dst >> 16) & 0xFF) as f32;
+                let dg = ((dst >> 8) & 0xFF) as f32;
+                let db = (dst & 0xFF) as f32;
+
+                let inv_a = 1.0 - af;
+                let out_r = (pr + dr * inv_a).round().clamp(0.0, 255.0) as u32;
+                let out_g = (pg + dg * inv_a).round().clamp(0.0, 255.0) as u32;
+                let out_b = (pb + db * inv_a).round().clamp(0.0, 255.0) as u32;
+                self.pixels[row_off + ix] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
     }
 
     /// Sidebar `Home` house icon centered at `(cx, cy)`.
@@ -993,6 +1045,26 @@ impl UiCanvas {
         );
     }
 
+    /// Clean Wi-Fi / AirPlay signal icon centered at `(cx, cy)`.
+    pub fn draw_wifi_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        let dot_y = cy + 5.0;
+        self.draw_circle(cx, dot_y, 1.8, color, opacity);
+        self.draw_arc_stroke(cx, dot_y, 5.2, -2.35, -0.79, 1.7, color, opacity);
+        self.draw_arc_stroke(cx, dot_y, 8.8, -2.35, -0.79, 1.7, color, opacity);
+        self.draw_arc_stroke(cx, dot_y, 12.4, -2.35, -0.79, 1.7, color, opacity);
+    }
+
+    /// Clean desktop monitor icon centered at `(cx, cy)` for Mirror Quality.
+    pub fn draw_monitor_icon(&mut self, cx: f32, cy: f32, color: Rgb, opacity: f32) {
+        let w = 16.0;
+        let h = 11.5;
+        let x = cx - w * 0.5;
+        let y = cy - 6.8;
+        self.draw_rounded_stroke(x, y, w, h, 2.2, 1.6, color, opacity);
+        self.draw_capsule_line(cx, y + h, cx, y + h + 3.0, 1.6, color, opacity);
+        self.draw_capsule_line(cx - 4.0, y + h + 3.2, cx + 4.0, y + h + 3.2, 1.6, color, opacity);
+    }
+
     /// Interactive iOS/macOS style toggle switch at logical `(x, y, w, h)`.
     pub fn draw_toggle_switch(
         &mut self,
@@ -1128,7 +1200,7 @@ impl UiCanvas {
         );
     }
 
-    /// Renders the complete Hero Illustration (Laptop + Mirrored Phone + Signal Waves + Standalone Phone)
+    /// Renders the Hero App Logo Illustration ("Glossy Laptop Mirroring App Icon")
     /// centered horizontally around `center_x` with top anchor `top_y`.
     pub fn draw_hero_laptop_phone_illustration(
         &mut self,
@@ -1136,221 +1208,31 @@ impl UiCanvas {
         top_y: f32,
         is_connecting: bool,
     ) {
-        // 1. Soft overlapping ambient sky-blue cloud circles behind the devices
-        let left_cloud_cx = center_x - 62.0;
-        let left_cloud_cy = top_y + 132.0;
-        self.draw_circle(left_cloud_cx, left_cloud_cy, 126.0, Rgb(239, 244, 254), 0.92);
+        self.draw_hero_illustration_sized(center_x, top_y, 112.0, is_connecting);
+    }
 
-        let right_cloud_cx = center_x + 148.0;
-        let right_cloud_cy = top_y + 138.0;
-        self.draw_circle(right_cloud_cx, right_cloud_cy, 96.0, Rgb(239, 244, 254), 0.88);
+    pub fn draw_hero_illustration_sized(
+        &mut self,
+        center_x: f32,
+        top_y: f32,
+        hero_size: f32,
+        is_connecting: bool,
+    ) {
+        let icon_x = (center_x - hero_size * 0.5).round();
+        let icon_y = top_y.round();
 
-        // Soft ambient floor glow beneath both devices
-        self.draw_soft_ellipse(
-            center_x + 20.0,
-            top_y + 228.0,
-            245.0,
-            26.0,
-            22.0,
-            Rgb(220, 232, 253),
-            0.65,
-        );
+        if is_connecting {
+            let pulse = 0.55 + 0.45 * self.anim.glide_phase.sin();
+            self.draw_circle(
+                center_x,
+                icon_y + hero_size * 0.5,
+                hero_size * 0.62,
+                Rgb(36, 107, 253),
+                0.10 * pulse,
+            );
+        }
 
-        // 2. Left 3D Laptop (lid + screen + mirrored phone + metallic base)
-        let lid_w = 224.0;
-        let lid_h = 158.0;
-        let lid_x = (center_x - 180.0).round();
-        let lid_y = (top_y + 52.0).round();
-
-        // Contact shadow under laptop base
-        self.draw_soft_ellipse(
-            lid_x + lid_w * 0.5,
-            lid_y + lid_h + 12.0,
-            148.0,
-            11.0,
-            8.0,
-            Rgb(30, 48, 86),
-            0.22,
-        );
-
-        // Laptop lid outer bezel (#0E1320 with subtle silver edge)
-        self.draw_rounded_card(
-            lid_x,
-            lid_y,
-            lid_w,
-            lid_h,
-            10.0,
-            Rgb(14, 19, 32),
-            Rgb(118, 124, 138),
-            1.2,
-            SHADOW_SLATE,
-            0.12,
-            14.0,
-            4.0,
-            1.0,
-        );
-        // Tiny webcam indicator dot on top bezel
-        self.draw_circle(lid_x + lid_w * 0.5, lid_y + 4.2, 1.2, Rgb(62, 72, 92), 1.0);
-
-        // Laptop inner display wallpaper (soft periwinkle-blue gradient with subtle diagonal wave)
-        let scr_x = lid_x + 7.5;
-        let scr_y = lid_y + 7.5;
-        let scr_w = lid_w - 15.0;
-        let scr_h = lid_h - 14.0;
-        self.draw_gradient_rounded_card(
-            scr_x,
-            scr_y,
-            scr_w,
-            scr_h,
-            3.5,
-            Rgb(192, 214, 250),
-            Rgb(226, 237, 254),
-            Rgb(180, 202, 240),
-            0.6,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-        // Subtle light-blue wave curve across laptop display
-        self.draw_soft_ellipse(
-            scr_x + scr_w * 0.25,
-            scr_y + scr_h * 0.82,
-            92.0,
-            44.0,
-            16.0,
-            Rgb(172, 199, 246),
-            0.45,
-        );
-
-        // Mirrored Smartphone centered inside Laptop display!
-        let m_phone_w = 62.0;
-        let m_phone_h = 122.0;
-        let m_phone_x = (lid_x + (lid_w - m_phone_w) * 0.5).round();
-        let m_phone_y = (scr_y + (scr_h - m_phone_h) * 0.5 + 1.0).round();
-        self.draw_phone_with_wave_wallpaper(
-            m_phone_x,
-            m_phone_y,
-            m_phone_w,
-            m_phone_h,
-            8.5,
-            3.0,
-            0.22,
-        );
-
-        // Laptop metallic aluminum base / deck
-        let base_w = 274.0;
-        let base_h = 11.5;
-        let base_x = (lid_x + (lid_w - base_w) * 0.5).round();
-        let base_y = lid_y + lid_h - 2.0;
-        self.draw_gradient_rounded_card(
-            base_x,
-            base_y,
-            base_w,
-            base_h,
-            4.5,
-            Rgb(226, 229, 238),
-            Rgb(118, 124, 138),
-            Rgb(152, 158, 172),
-            0.8,
-            SHADOW_SLATE,
-            0.14,
-            6.0,
-            2.0,
-            1.0,
-        );
-        // Top highlight strip of aluminum deck
-        self.draw_rounded_card(
-            base_x + 2.0,
-            base_y + 0.5,
-            base_w - 4.0,
-            3.5,
-            1.5,
-            Rgb(242, 244, 249),
-            Rgb(242, 244, 249),
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            0.85,
-        );
-        // Center thumb-indent notch on laptop deck
-        let lip_w = 44.0;
-        self.draw_rounded_card(
-            base_x + (base_w - lip_w) * 0.5,
-            base_y + 0.5,
-            lip_w,
-            3.5,
-            1.7,
-            Rgb(142, 148, 162),
-            Rgb(142, 148, 162),
-            0.0,
-            SHADOW_SLATE,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        );
-
-        // 3. Center Wireless Signal Waves (`•))`) between Laptop and Smartphone
-        let sig_cx = center_x + 84.0;
-        let sig_cy = top_y + 142.0;
-        let wave_pulse = if is_connecting {
-            0.65 + 0.35 * self.anim.glide_phase.sin()
-        } else {
-            1.0
-        };
-        let wave_col = Rgb(47, 118, 246);
-        self.draw_circle(sig_cx, sig_cy, 5.2, wave_col, 1.0);
-        self.draw_arc_stroke(
-            sig_cx - 2.0,
-            sig_cy,
-            17.0,
-            -0.72,
-            0.72,
-            4.8,
-            wave_col,
-            wave_pulse,
-        );
-        self.draw_arc_stroke(
-            sig_cx - 2.0,
-            sig_cy,
-            29.5,
-            -0.76,
-            0.76,
-            4.8,
-            wave_col,
-            wave_pulse * 0.92,
-        );
-
-        // 4. Right Standalone 3D Smartphone
-        let r_phone_w = 72.0;
-        let r_phone_h = 152.0;
-        let r_phone_x = (center_x + 140.0).round();
-        let r_phone_y = (top_y + 64.0).round();
-
-        // Floor shadow under standalone phone
-        self.draw_soft_ellipse(
-            r_phone_x + r_phone_w * 0.5,
-            r_phone_y + r_phone_h + 4.0,
-            52.0,
-            9.5,
-            7.0,
-            Rgb(30, 48, 86),
-            0.24,
-        );
-
-        self.draw_phone_with_wave_wallpaper(
-            r_phone_x,
-            r_phone_y,
-            r_phone_w,
-            r_phone_h,
-            11.0,
-            3.5,
-            0.18,
-        );
+        self.draw_app_brand_icon(icon_x, icon_y, hero_size);
     }
 
     /// Legacy startup icon helper kept for unit tests.
@@ -1544,6 +1426,276 @@ impl UiCanvas {
         let w = self.measure_text_width(text, px_size, weight);
         let x = center_x - w * 0.5;
         self.draw_text(text, x, y, px_size, weight, color, opacity);
+    }
+
+    /// Scales and composites an ARGB pixel buffer with rounded-corner anti-aliased clipping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image_rgba(
+        &mut self,
+        src_pixels: &[u32],
+        src_w: usize,
+        src_h: usize,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        corner_r: f32,
+        opacity: f32,
+    ) {
+        if src_w == 0
+            || src_h == 0
+            || src_pixels.len() < src_w * src_h
+            || dst_w <= 0.0
+            || dst_h <= 0.0
+        {
+            return;
+        }
+        let s = self.scale;
+        let phys_x0 = (dst_x * s).round() as i32;
+        let phys_y0 = (dst_y * s).round() as i32;
+        let phys_x1 = ((dst_x + dst_w) * s).round() as i32;
+        let phys_y1 = ((dst_y + dst_h) * s).round() as i32;
+
+        let min_x = phys_x0.max(0).min(self.width as i32) as usize;
+        let max_x = phys_x1.max(0).min(self.width as i32) as usize;
+        let min_y = phys_y0.max(0).min(self.height as i32) as usize;
+        let max_y = phys_y1.max(0).min(self.height as i32) as usize;
+
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+
+        let pw = (phys_x1 - phys_x0).max(1) as f32;
+        let ph = (phys_y1 - phys_y0).max(1) as f32;
+        let cr = (corner_r * s).max(0.0);
+
+        for py in min_y..max_y {
+            let v = ((py as f32 - phys_y0 as f32) / ph).clamp(0.0, 1.0);
+            let sy = ((v * (src_h - 1) as f32).round() as usize).min(src_h - 1);
+            let row_offset = py * self.width;
+            let src_row_offset = sy * src_w;
+
+            for px in min_x..max_x {
+                let mut cov = 1.0f32;
+                if cr > 0.0 {
+                    let dx = (px as f32 - phys_x0 as f32).min((phys_x1 - 1) as f32 - px as f32);
+                    let dy = (py as f32 - phys_y0 as f32).min((phys_y1 - 1) as f32 - py as f32);
+                    if dx < cr && dy < cr {
+                        let d = ((cr - dx) * (cr - dx) + (cr - dy) * (cr - dy)).sqrt();
+                        if d > cr + 0.5 {
+                            continue;
+                        } else if d > cr - 0.5 {
+                            cov = (cr + 0.5 - d).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+
+                let u = ((px as f32 - phys_x0 as f32) / pw).clamp(0.0, 1.0);
+                let sx = ((u * (src_w - 1) as f32).round() as usize).min(src_w - 1);
+                let src_pixel = src_pixels[src_row_offset + sx];
+
+                let alpha = (((src_pixel >> 24) & 0xFF) as f32 / 255.0) * opacity * cov;
+                if alpha >= 0.998 {
+                    self.pixels[row_offset + px] = src_pixel;
+                } else if alpha > 0.002 {
+                    let sr = ((src_pixel >> 16) & 0xFF) as f32;
+                    let sg = ((src_pixel >> 8) & 0xFF) as f32;
+                    let sb = (src_pixel & 0xFF) as f32;
+
+                    let dst_pixel = self.pixels[row_offset + px];
+                    let dr = ((dst_pixel >> 16) & 0xFF) as f32;
+                    let dg = ((dst_pixel >> 8) & 0xFF) as f32;
+                    let db = (dst_pixel & 0xFF) as f32;
+
+                    let out_r = (sr * alpha + dr * (1.0 - alpha)).round() as u32;
+                    let out_g = (sg * alpha + dg * (1.0 - alpha)).round() as u32;
+                    let out_b = (sb * alpha + db * (1.0 - alpha)).round() as u32;
+
+                    self.pixels[row_offset + px] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
+                }
+            }
+        }
+    }
+
+    /// Renders the filmstrip frame preview card exactly styled after screenshot 2.
+    /// Features:
+    /// - Deep obsidian film frame container with rounded corners
+    /// - 5 crisp white sprocket perforations on both left and right edges
+    /// - Anti-aliased video snapshot or stylized fallback display
+    /// - Interactive glowing Apple Blue play overlay on hover
+    pub fn draw_filmstrip_frame(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        thumbnail: Option<&VideoThumbnail>,
+        is_hovered: bool,
+    ) {
+        let film_bg = Rgb(18, 22, 28);
+        let film_border = if is_hovered { APPLE_BLUE } else { Rgb(38, 46, 58) };
+        self.draw_rounded_card(
+            x,
+            y,
+            w,
+            h,
+            9.0,
+            film_bg,
+            film_border,
+            if is_hovered { 1.5 } else { 1.0 },
+            SHADOW_SLATE,
+            if is_hovered { 0.12 } else { 0.06 },
+            if is_hovered { 14.0 } else { 8.0 },
+            if is_hovered { 4.0 } else { 2.5 },
+            1.0,
+        );
+
+        // Film Sprocket Perforations (5 on left, 5 on right)
+        let num_sprockets = 5;
+        let sprocket_w = 5.5;
+        let sprocket_h = 9.0;
+        let sprocket_r = 1.6;
+        let sprocket_col = Rgb(242, 246, 252);
+        let left_x = x + 5.5;
+        let right_x = x + w - 5.5 - sprocket_w;
+        let pad_v = 8.0;
+        let total_avail = (h - pad_v * 2.0).max(sprocket_h * num_sprockets as f32);
+        let gap_v = (total_avail - (num_sprockets as f32 * sprocket_h)) / (num_sprockets as f32 - 1.0).max(1.0);
+
+        for i in 0..num_sprockets {
+            let sy = y + pad_v + i as f32 * (sprocket_h + gap_v);
+            self.draw_rounded_card(
+                left_x,
+                sy,
+                sprocket_w,
+                sprocket_h,
+                sprocket_r,
+                sprocket_col,
+                sprocket_col,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                0.92,
+            );
+            self.draw_rounded_card(
+                right_x,
+                sy,
+                sprocket_w,
+                sprocket_h,
+                sprocket_r,
+                sprocket_col,
+                sprocket_col,
+                0.0,
+                SHADOW_SLATE,
+                0.0,
+                0.0,
+                0.0,
+                0.92,
+            );
+        }
+
+        // Inner Video Screen Frame
+        let inner_x = x + 16.5;
+        let inner_y = y + 6.0;
+        let inner_w = w - 33.0;
+        let inner_h = h - 12.0;
+        let inner_r = 5.5;
+
+        if let Some(thumb) = thumbnail {
+            self.draw_image_rgba(
+                &thumb.pixels,
+                thumb.width,
+                thumb.height,
+                inner_x,
+                inner_y,
+                inner_w,
+                inner_h,
+                inner_r,
+                1.0,
+            );
+        } else {
+            self.draw_video_preview_fallback(inner_x, inner_y, inner_w, inner_h, inner_r);
+        }
+
+        // Inner subtle bezel border
+        self.draw_rounded_stroke(inner_x, inner_y, inner_w, inner_h, inner_r, 1.0, Rgb(48, 56, 70), 0.6);
+
+        // Center Play Button Disc Overlay
+        let cx = inner_x + inner_w * 0.5;
+        let cy = inner_y + inner_h * 0.5;
+        let play_r = if is_hovered { 19.0 } else { 16.0 };
+        let play_bg = if is_hovered { APPLE_BLUE } else { Rgb(14, 18, 24) };
+        let play_alpha = if is_hovered { 0.95 } else { 0.76 };
+        self.draw_circle(cx, cy, play_r, play_bg, play_alpha);
+        if !is_hovered {
+            self.draw_circle(cx, cy, play_r, CARD_WHITE, 0.25);
+        }
+        self.draw_play_icon(
+            cx + 1.2,
+            cy,
+            if is_hovered { 9.0 } else { 7.5 },
+            CARD_WHITE,
+            1.0,
+        );
+
+        // Corner "MP4" badge inside video photo
+        let badge_w = 34.0;
+        let badge_h = 16.0;
+        let badge_x = inner_x + inner_w - badge_w - 5.0;
+        let badge_y = inner_y + inner_h - badge_h - 5.0;
+        self.draw_rounded_card(
+            badge_x,
+            badge_y,
+            badge_w,
+            badge_h,
+            3.5,
+            Rgb(10, 14, 20),
+            Rgb(40, 48, 60),
+            0.5,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            0.75,
+        );
+        self.draw_text_centered(
+            "MP4",
+            badge_x + badge_w * 0.5,
+            badge_y + 3.0,
+            9.5,
+            FontWeight::Bold,
+            CARD_WHITE,
+            0.92,
+        );
+    }
+
+    /// Stylized wallpaper fallback when a video frame is not yet decoded or file is newly created.
+    pub fn draw_video_preview_fallback(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
+        // Deep gradient backdrop
+        self.draw_gradient_rounded_card(
+            x,
+            y,
+            w,
+            h,
+            r,
+            Rgb(15, 23, 42),
+            Rgb(30, 41, 59),
+            Rgb(40, 52, 72),
+            0.8,
+            SHADOW_SLATE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        // Soft blue ambient wave in center
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        self.draw_soft_ellipse(cx, cy, w * 0.45, h * 0.35, 8.0, Rgb(21, 101, 240), 0.22);
+        // Stylized camcorder icon
+        self.draw_video_cam_icon(cx, cy - 2.0, Rgb(148, 163, 184), 0.75);
     }
 
     /// Writes the current physical pixel buffer (`0xAARRGGBB`) as a lossless 24-bit RGB PNG file

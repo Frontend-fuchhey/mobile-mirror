@@ -29,9 +29,11 @@ public final class Server {
 
     public static void main(String... args) {
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
-            System.err.println("[MirrorServer] Fatal exception on thread " + thread.getName() + ": " + throwable.getMessage());
+            System.err.println("[MirrorServer] Uncaught exception on thread " + thread.getName() + ": " + throwable.getMessage());
             throwable.printStackTrace(System.err);
-            System.exit(1);
+            if ("main".equals(thread.getName())) {
+                System.exit(1);
+            }
         });
 
         try {
@@ -59,45 +61,52 @@ public final class Server {
             capture.close();
         }, "mirror-cleanup"));
 
-        try (StreamServer server = new StreamServer(options.getPort());
-             SocketChannel clientChannel = server.acceptClient();
-             NalStreamer streamer = new NalStreamer(clientChannel, options.shouldSendHeader());
-             AudioCapture audioCapture = new AudioCapture()) {
+        try (StreamServer server = new StreamServer(options.getPort())) {
+            while (!Thread.currentThread().isInterrupted()) {
+                try (SocketChannel clientChannel = server.acceptClient();
+                     NalStreamer streamer = new NalStreamer(clientChannel, options.shouldSendHeader());
+                     AudioCapture audioCapture = new AudioCapture()) {
 
-            // Guarantee stream header is ALWAYS sent first before any audio or video frames
-            capture.prepare();
-            streamer.writeStreamHeader(capture.getVideoSize());
+                    encoder.resetForNewClient();
 
-            audioCapture.start(streamer);
-
-            // Listen for real-time control commands from the desktop client (e.g. [M] to toggle Mic ON/OFF, [K] for instant IDR keyframe)
-            Thread controlThread = new Thread(() -> {
-                ByteBuffer cmdBuf = ByteBuffer.allocate(1);
-                try {
-                    while (!Thread.currentThread().isInterrupted()) {
-                        cmdBuf.clear();
-                        int n = clientChannel.read(cmdBuf);
-                        if (n < 0) {
-                            break;
-                        }
-                        if (n > 0) {
-                            byte cmd = cmdBuf.get(0);
-                            if (cmd == 1 || cmd == 'M') {
-                                audioCapture.setMicEnabled(true);
-                            } else if (cmd == 0 || cmd == 'm') {
-                                audioCapture.setMicEnabled(false);
-                            } else if (cmd == 2 || cmd == 'K' || cmd == 'k') {
-                                encoder.requestSyncFrame();
+                    // Listen for real-time control commands from the desktop client (e.g. [M] to toggle Mic ON/OFF, [K] for instant IDR keyframe)
+                    Thread controlThread = new Thread(() -> {
+                        ByteBuffer cmdBuf = ByteBuffer.allocate(1);
+                        try {
+                            while (!Thread.currentThread().isInterrupted()) {
+                                cmdBuf.clear();
+                                int n = clientChannel.read(cmdBuf);
+                                if (n < 0) {
+                                    encoder.disconnectClient();
+                                    break;
+                                }
+                                if (n > 0) {
+                                    byte cmd = cmdBuf.get(0);
+                                    if (cmd == 1 || cmd == 'M') {
+                                        audioCapture.setMicEnabled(true);
+                                    } else if (cmd == 0 || cmd == 'm') {
+                                        audioCapture.setMicEnabled(false);
+                                    } else if (cmd == 2 || cmd == 'K' || cmd == 'k') {
+                                        encoder.requestSyncFrame();
+                                    }
+                                }
                             }
+                        } catch (Throwable ignored) {
+                            encoder.disconnectClient();
                         }
-                    }
-                } catch (Throwable ignored) {
-                }
-            }, "client-control-reader");
-            controlThread.setDaemon(true);
-            controlThread.start();
+                    }, "client-control-reader");
+                    controlThread.setDaemon(true);
 
-            encoder.streamScreen(streamer);
+                    encoder.streamScreen(streamer, () -> {
+                        audioCapture.start(streamer);
+                        controlThread.start();
+                    });
+                } catch (Throwable clientErr) {
+                    System.err.println("[MirrorServer] Client session ended (" + clientErr.getMessage() + "), ready for immediate reconnect...");
+                } finally {
+                    capture.close();
+                }
+            }
         } finally {
             capture.close();
             System.out.println("[MirrorServer] Streaming session finished cleanly.");

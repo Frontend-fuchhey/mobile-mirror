@@ -17,4 +17,17 @@ fn main() {
         println!("cargo:rustc-link-lib=avutil");
         println!("cargo:rustc-link-lib=SDL3");
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+            let res_path = std::path::Path::new(&manifest_dir)
+                .join("assets")
+                .join("app_icon.res");
+            if res_path.exists() {
+                println!("cargo:rerun-if-changed={}", res_path.display());
+                println!("cargo:rustc-link-arg-bins={}", res_path.display());
+            }
+        }
+    }
 }

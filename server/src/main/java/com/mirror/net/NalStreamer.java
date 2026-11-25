@@ -92,8 +92,7 @@ public final class NalStreamer implements Closeable {
         headerBuffer.putInt(bufferInfo.size);
         headerBuffer.flip();
 
-        writeFully(channel, headerBuffer);
-        writeFully(channel, codecBuffer);
+        writeFrameLocked(codecBuffer);
     }
 
     /**
@@ -112,8 +111,7 @@ public final class NalStreamer implements Closeable {
         headerBuffer.flip();
 
         ByteBuffer payload = ByteBuffer.wrap(data, offset, length);
-        writeFully(channel, headerBuffer);
-        writeFully(channel, payload);
+        writeFrameLocked(payload);
     }
 
     /**
@@ -140,8 +138,22 @@ public final class NalStreamer implements Closeable {
         headerBuffer.putInt(bufferInfo.size);
         headerBuffer.flip();
 
-        writeFully(channel, headerBuffer);
-        writeFully(channel, codecBuffer);
+        writeFrameLocked(codecBuffer);
+    }
+
+    private void writeFrameLocked(ByteBuffer payload) throws IOException {
+        gatherBuffers[0] = headerBuffer;
+        gatherBuffers[1] = payload;
+        try {
+            while (headerBuffer.hasRemaining() || payload.hasRemaining()) {
+                long written = channel.write(gatherBuffers, 0, 2);
+                if (written < 0) {
+                    throw new IOException("Socket channel closed");
+                }
+            }
+        } finally {
+            gatherBuffers[1] = null;
+        }
     }
 
     private static void writeFully(SocketChannel ch, ByteBuffer buf) throws IOException {

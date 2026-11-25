@@ -87,6 +87,11 @@ pub struct SDL_Texture {
 }
 
 #[repr(C)]
+pub struct SDL_Surface {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct SDL_FRect {
     pub x: f32,
@@ -167,6 +172,12 @@ pub struct Sdl3Api {
     pub sdl_set_window_bordered: Option<unsafe extern "C" fn(*mut SDL_Window, bool) -> bool>,
     pub sdl_set_window_hit_test:
         Option<unsafe extern "C" fn(*mut SDL_Window, Option<SDL_HitTest>, *mut c_void) -> bool>,
+    pub sdl_create_surface_from: Option<
+        unsafe extern "C" fn(c_int, c_int, u32, *mut c_void, c_int) -> *mut SDL_Surface,
+    >,
+    pub sdl_set_window_icon:
+        Option<unsafe extern "C" fn(*mut SDL_Window, *mut SDL_Surface) -> bool>,
+    pub sdl_destroy_surface: Option<unsafe extern "C" fn(*mut SDL_Surface)>,
     pub sdl_create_renderer:
         unsafe extern "C" fn(*mut SDL_Window, *const c_char) -> *mut SDL_Renderer,
     pub sdl_destroy_renderer: unsafe extern "C" fn(*mut SDL_Renderer),
@@ -264,6 +275,9 @@ impl Sdl3Api {
                 sdl_set_window_always_on_top: lib.get_sym("SDL_SetWindowAlwaysOnTop").ok(),
                 sdl_set_window_bordered: lib.get_sym("SDL_SetWindowBordered").ok(),
                 sdl_set_window_hit_test: lib.get_sym("SDL_SetWindowHitTest").ok(),
+                sdl_create_surface_from: lib.get_sym("SDL_CreateSurfaceFrom").ok(),
+                sdl_set_window_icon: lib.get_sym("SDL_SetWindowIcon").ok(),
+                sdl_destroy_surface: lib.get_sym("SDL_DestroySurface").ok(),
                 sdl_create_renderer: lib.get_sym("SDL_CreateRenderer")?,
                 sdl_destroy_renderer: lib.get_sym("SDL_DestroyRenderer")?,
                 sdl_set_render_vsync: lib.get_sym("SDL_SetRenderVSync")?,

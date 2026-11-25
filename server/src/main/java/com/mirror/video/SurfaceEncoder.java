@@ -27,17 +27,29 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class SurfaceEncoder {
     private static final String MIME_TYPE_AVC = MediaFormat.MIMETYPE_VIDEO_AVC; // "video/avc"
     private static final String KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder";
-    private static final long REPEAT_FRAME_DELAY_US = 16_667L; // 16.67ms (60 FPS continuous cadence)
+    // Idle repeat-frame threshold (50ms / 20 FPS heartbeat when screen is completely static).
+    // Must be strictly greater than a 60Hz/90Hz/120Hz VSync interval (8.33ms..16.67ms) so
+    // GraphicBufferSource never injects duplicate frames in between real VSync frames!
+    private static final long REPEAT_FRAME_DELAY_US = 50_000L;
     private static final long DEQUEUE_TIMEOUT_US = 10_000L;    // 10ms poll timeout
 
     private final ScreenCapture capture;
     private final Options options;
     private final AtomicBoolean stopped = new AtomicBoolean(false);
+    private final AtomicBoolean clientDisconnected = new AtomicBoolean(false);
     private volatile MediaCodec activeCodec;
 
     public SurfaceEncoder(ScreenCapture capture, Options options) {
         this.capture = capture;
         this.options = options;
+    }
+
+    public void resetForNewClient() {
+        clientDisconnected.set(false);
+    }
+
+    public void disconnectClient() {
+        clientDisconnected.set(true);
     }
 
     /**
@@ -57,48 +69,35 @@ public final class SurfaceEncoder {
     }
 
     public void streamScreen(NalStreamer streamer) throws IOException {
-        while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+        streamScreen(streamer, null);
+    }
+
+    public void streamScreen(NalStreamer streamer, Runnable onFirstStart) throws IOException {
+        boolean headerSent = false;
+        int consecutiveFailures = 0;
+
+        while (!stopped.get() && !clientDisconnected.get() && !Thread.currentThread().isInterrupted()) {
             capture.prepare();
             Size videoSize = capture.getVideoSize();
 
-            MediaCodec codec = createHardwareEncoder(options.getEncoderName());
+            MediaCodec codec = null;
             Surface inputSurface = null;
             try {
-                // Tier 1: H.264 High Profile (CABAC + 8x8 DCT) + CBR + Low Latency
-                boolean configured = false;
-                try {
-                    MediaFormat highFormat = createLowLatencyFormat(videoSize, options, true, true);
-                    codec.configure(highFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-                    configured = true;
-                } catch (Exception e1) {
-                    System.err.println("[MirrorServer] High Profile format rejected (" + e1.getMessage()
-                            + "), retrying Tier 2 (Default Profile + CBR)...");
-                    codec = resetOrRecreateCodec(codec, options.getEncoderName());
-                }
+                Object[] started = configureAndStartEncoderWithFallbacks(videoSize);
+                codec = (MediaCodec) started[0];
+                inputSurface = (Surface) started[1];
 
-                // Tier 2: Default Profile + CBR + Low Latency
-                if (!configured) {
-                    try {
-                        MediaFormat cbrFormat = createLowLatencyFormat(videoSize, options, false, true);
-                        codec.configure(cbrFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-                        configured = true;
-                    } catch (Exception e2) {
-                        System.err.println("[MirrorServer] CBR/strict format rejected (" + e2.getMessage()
-                                + "), retrying Tier 3 (Standard low-latency profile)...");
-                        codec = resetOrRecreateCodec(codec, options.getEncoderName());
+                capture.start(inputSurface);
+                this.activeCodec = codec;
+                consecutiveFailures = 0;
+
+                if (!headerSent) {
+                    streamer.writeStreamHeader(videoSize);
+                    headerSent = true;
+                    if (onFirstStart != null) {
+                        onFirstStart.run();
                     }
                 }
-
-                // Tier 3: Standard low-latency baseline fallback
-                if (!configured) {
-                    MediaFormat fallbackFormat = createLowLatencyFormat(videoSize, options, false, false);
-                    codec.configure(fallbackFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-                }
-
-                inputSurface = codec.createInputSurface();
-                capture.start(inputSurface);
-                codec.start();
-                this.activeCodec = codec;
 
                 System.out.println("[MirrorServer] Hardware encoder started: " + codec.getName()
                         + " (" + videoSize + " @ " + options.getMaxFps() + " FPS, "
@@ -109,6 +108,20 @@ public final class SurfaceEncoder {
                     break;
                 }
                 System.out.println("[MirrorServer] Display orientation/dimensions changed, reconfiguring encoder...");
+            } catch (IOException ioErr) {
+                throw ioErr;
+            } catch (Throwable err) {
+                consecutiveFailures++;
+                System.err.println("[MirrorServer] Encoder setup/reconfigure error (attempt " + consecutiveFailures + "/3): " + err.getMessage());
+                if (consecutiveFailures >= 3) {
+                    throw new IOException("Failed to initialize hardware encoder after 3 attempts", err);
+                }
+                try {
+                    Thread.sleep(80);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             } finally {
                 this.activeCodec = null;
                 capture.close();
@@ -118,14 +131,86 @@ public final class SurfaceEncoder {
                     } catch (Throwable ignored) {
                     }
                 }
-                try {
-                    codec.stop();
-                } catch (Throwable ignored) {
+                if (codec != null) {
+                    try {
+                        codec.stop();
+                    } catch (Throwable ignored) {
+                    }
+                    try {
+                        codec.release();
+                    } catch (Throwable ignored) {
+                    }
                 }
-                try {
-                    codec.release();
-                } catch (Throwable ignored) {
-                }
+            }
+        }
+    }
+
+    /**
+     * Attempts 4 progressive hardware MediaCodec tiers, validating configure() + createInputSurface() + start()
+     * together so drivers that defer validation to start() (e.g. high frame rates or High Profile) fall back cleanly.
+     */
+    private Object[] configureAndStartEncoderWithFallbacks(Size videoSize) throws IOException {
+        MediaCodec codec = createHardwareEncoder(options.getEncoderName());
+        Surface inputSurface = null;
+
+        // Tier 1: H.264 High Profile (CABAC + 8x8 DCT) + CBR/VBR + Low Latency + target FPS
+        try {
+            MediaFormat highFormat = createLowLatencyFormat(videoSize, options, true, true, options.getMaxFps());
+            codec.configure(highFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = codec.createInputSurface();
+            codec.start();
+            return new Object[]{codec, inputSurface};
+        } catch (Throwable e1) {
+            System.err.println("[MirrorServer] Tier 1 High Profile rejected (" + e1.getMessage()
+                    + "), retrying Tier 2 (Default Profile + CBR)...");
+            releaseSurfaceQuietly(inputSurface);
+            inputSurface = null;
+            codec = resetOrRecreateCodec(codec, options.getEncoderName());
+        }
+
+        // Tier 2: Default Profile + CBR/VBR + Low Latency + target FPS
+        try {
+            MediaFormat cbrFormat = createLowLatencyFormat(videoSize, options, false, true, options.getMaxFps());
+            codec.configure(cbrFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = codec.createInputSurface();
+            codec.start();
+            return new Object[]{codec, inputSurface};
+        } catch (Throwable e2) {
+            System.err.println("[MirrorServer] Tier 2 CBR format rejected (" + e2.getMessage()
+                    + "), retrying Tier 3 (Standard low-latency profile)...");
+            releaseSurfaceQuietly(inputSurface);
+            inputSurface = null;
+            codec = resetOrRecreateCodec(codec, options.getEncoderName());
+        }
+
+        // Tier 3: Standard low-latency baseline fallback at target FPS
+        try {
+            MediaFormat stdFormat = createLowLatencyFormat(videoSize, options, false, false, options.getMaxFps());
+            codec.configure(stdFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = codec.createInputSurface();
+            codec.start();
+            return new Object[]{codec, inputSurface};
+        } catch (Throwable e3) {
+            System.err.println("[MirrorServer] Tier 3 format rejected (" + e3.getMessage()
+                    + "), retrying Tier 4 (Safe 60 FPS hardware baseline)...");
+            releaseSurfaceQuietly(inputSurface);
+            inputSurface = null;
+            codec = resetOrRecreateCodec(codec, options.getEncoderName());
+        }
+
+        // Tier 4: Universal 60 FPS safe hardware baseline (guarantees connection when 90/120 FPS exceeds SoC cap)
+        MediaFormat safe60Format = createLowLatencyFormat(videoSize, options, false, false, Math.min(60, Math.max(30, options.getMaxFps())));
+        codec.configure(safe60Format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        inputSurface = codec.createInputSurface();
+        codec.start();
+        return new Object[]{codec, inputSurface};
+    }
+
+    private static void releaseSurfaceQuietly(Surface surface) {
+        if (surface != null) {
+            try {
+                surface.release();
+            } catch (Throwable ignored) {
             }
         }
     }
@@ -147,7 +232,7 @@ public final class SurfaceEncoder {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         long lastCheck = System.currentTimeMillis();
 
-        while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+        while (!stopped.get() && !clientDisconnected.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 int outputIndex = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US);
                 if (outputIndex >= 0) {
@@ -175,7 +260,7 @@ public final class SurfaceEncoder {
             }
 
             long now = System.currentTimeMillis();
-            if (now - lastCheck >= 200) {
+            if (now - lastCheck >= 300) {
                 lastCheck = now;
                 if (capture.checkDisplayChanged()) {
                     return true;
@@ -187,6 +272,7 @@ public final class SurfaceEncoder {
 
     public void stop() {
         stopped.set(true);
+        clientDisconnected.set(true);
     }
 
     private static MediaCodec createHardwareEncoder(String encoderName) throws IOException {
@@ -200,20 +286,21 @@ public final class SurfaceEncoder {
             Size size,
             Options options,
             boolean highProfile,
-            boolean includeAdvancedKeys
+            boolean includeAdvancedKeys,
+            int requestedFps
     ) {
         MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE_AVC, size.getWidth(), size.getHeight());
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
         format.setInteger(MediaFormat.KEY_BIT_RATE, options.getBitRate());
-        int targetFps = Math.max(30, options.getMaxFps());
+        int targetFps = Math.max(30, requestedFps > 0 ? requestedFps : options.getMaxFps());
         format.setInteger(MediaFormat.KEY_FRAME_RATE, targetFps);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, options.getIFrameInterval());
 
-        long repeatDelayUs = Math.max(8_333L, Math.min(REPEAT_FRAME_DELAY_US, 1_000_000L / Math.max(60, targetFps)));
-        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatDelayUs);
+        // Only repeat previous frame when screen is idle for >= 50ms (never between active 60/90/120Hz VSync frames)
+        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_DELAY_US);
 
-        if (options.getMaxFps() > 0) {
-            format.setFloat(KEY_MAX_FPS_TO_ENCODER, (float) options.getMaxFps());
+        if (targetFps > 0) {
+            format.setFloat(KEY_MAX_FPS_TO_ENCODER, (float) targetFps);
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -229,9 +316,14 @@ public final class SurfaceEncoder {
             );
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 int pixels = size.getWidth() * size.getHeight();
-                int level = (pixels <= 2_073_600)
-                        ? MediaCodecInfo.CodecProfileLevel.AVCLevel42
-                        : MediaCodecInfo.CodecProfileLevel.AVCLevel51;
+                int level;
+                if (targetFps > 60 && pixels > 1_000_000) {
+                    level = MediaCodecInfo.CodecProfileLevel.AVCLevel52;
+                } else if (targetFps > 60 || pixels > 2_073_600) {
+                    level = MediaCodecInfo.CodecProfileLevel.AVCLevel51;
+                } else {
+                    level = MediaCodecInfo.CodecProfileLevel.AVCLevel42;
+                }
                 format.setInteger(MediaFormat.KEY_LEVEL, level);
             }
         }

@@ -74,7 +74,14 @@ public final class ScreenCapture implements AutoCloseable {
                 SurfaceControl.closeTransaction();
             }
             System.out.println("[MirrorServer] Bound encoder surface via SurfaceControl API");
-        } catch (Exception surfaceControlError) {
+        } catch (Throwable surfaceControlError) {
+            if (this.surfaceControlDisplay != null) {
+                try {
+                    SurfaceControl.destroyDisplay(this.surfaceControlDisplay);
+                } catch (Throwable ignored) {
+                }
+                this.surfaceControlDisplay = null;
+            }
             // Strategy 2: Reflective DisplayManager.createVirtualDisplay (Android 12/13/14/15/16+)
             try {
                 this.virtualDisplay = ServiceManager.getDisplayManager().createVirtualDisplay(
@@ -85,7 +92,7 @@ public final class ScreenCapture implements AutoCloseable {
                         encoderInputSurface
                 );
                 System.out.println("[MirrorServer] Bound encoder surface via DisplayManager.createVirtualDisplay API");
-            } catch (Exception dmError) {
+            } catch (Throwable dmError) {
                 throw new IllegalStateException(
                         "Could not capture display via SurfaceControl (" + surfaceControlError.getMessage()
                                 + ") or DisplayManager (" + dmError.getMessage() + ")",

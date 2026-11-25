@@ -7,11 +7,18 @@ use std::io::{BufRead, BufReader, ErrorKind};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+static ADB_PIPELINE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn pipeline_lock() -> &'static Mutex<()> {
+    ADB_PIPELINE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -428,6 +435,8 @@ pub struct AdbSessionGuard {
     adb_bin: PathBuf,
     serial: String,
     port: u16,
+    quality: StreamQualityConfig,
+    generation: u64,
     daemon_child: Option<Child>,
     cleanup_done: bool,
 }
@@ -488,6 +497,9 @@ impl AdbSessionGuard {
     where
         F: FnMut(&str),
     {
+        let generation = SESSION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        let _pipeline_guard = pipeline_lock().lock().unwrap_or_else(|e| e.into_inner());
+
         // Step 1: Locate `adb` & verify physical USB device
         on_status("Verifying USB connection\u{2026}");
         let adb_bin = locate_adb_binary()?;
@@ -542,7 +554,7 @@ impl AdbSessionGuard {
         // and establish a fresh `adb -s <serial> forward tcp:<port> tcp:<port>`.
         on_status("Opening high-speed USB video tunnel\u{2026}");
         kill_remote_server(&adb_bin, Some(&serial));
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(Duration::from_millis(120));
 
         let forward_spec = format!("tcp:{}", port);
         let _ = new_hidden_command(&adb_bin)
@@ -568,50 +580,8 @@ impl AdbSessionGuard {
 
         // Step 4: Spawn `com.mirror.Server` via `app_process` with dynamic quality settings
         on_status("Starting low-latency hardware video stream over USB");
-        let remote_cmd = format!(
-            "CLASSPATH=/data/local/tmp/server.jar app_process / com.mirror.Server port={} max_size={} bitrate={} fps={} cbr={}",
-            port, quality.max_size, quality.bitrate, quality.fps, quality.cbr
-        );
-        let mut child = new_hidden_command(&adb_bin)
-            .args(["-s", &serial, "shell", &remote_cmd])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                UsbCheckError::Other(format!(
-                    "Failed to spawn `app_process` server daemon: {}",
-                    e
-                ))
-            })?;
-
-        // Drain stdout & stderr continuously on lightweight background threads so OS pipes
-        // never fill/block during multi-hour sessions while keeping recent lines for crash diagnostics.
-        let recent_logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::with_capacity(16)));
-        if let Some(stdout) = child.stdout.take() {
-            let logs_ref = Arc::clone(&recent_logs);
-            let _ = thread::Builder::new()
-                .name("adb-server-stdout".to_string())
-                .spawn(move || {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines().map_while(Result::ok) {
-                        println!("{}", line);
-                        push_log_line(&logs_ref, line);
-                    }
-                });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let logs_ref = Arc::clone(&recent_logs);
-            let _ = thread::Builder::new()
-                .name("adb-server-stderr".to_string())
-                .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines().map_while(Result::ok) {
-                        eprintln!("{}", line);
-                        push_log_line(&logs_ref, line);
-                    }
-                });
-        }
+        let (child, recent_logs, server_listening) =
+            spawn_remote_server_process(&adb_bin, &serial, port, quality)?;
 
         // Wrap immediately in `AdbSessionGuard` so any early return or cancellation automatically
         // kills `daemon_child`, removes `adb forward`, and cleans up the remote `app_process`.
@@ -619,14 +589,37 @@ impl AdbSessionGuard {
             adb_bin: adb_bin.clone(),
             serial: serial.clone(),
             port,
+            quality,
+            generation,
             daemon_child: Some(child),
             cleanup_done: false,
         };
 
-        // Step 5: Poll/connect `StreamReader` up to ~8 seconds, checking `daemon_child.try_wait()`
-        // on every iteration so early exits report the exact root cause immediately.
+        // Step 5: Wait for `com.mirror.Server` to bind its local socket ("Listening on 127.0.0.1:")
+        // so we never spam `adbd` with premature failed forward connections during ART VM startup.
         on_status("Synchronizing 60 FPS video stream\u{2026}");
-        thread::sleep(Duration::from_millis(200));
+        let listen_wait_deadline = Instant::now() + Duration::from_millis(2400);
+        while Instant::now() < listen_wait_deadline && !server_listening.load(Ordering::Acquire) {
+            if is_cancelled(running) {
+                return Err(UsbCheckError::Other("Connection cancelled".to_string()));
+            }
+            if let Some(ref mut proc) = guard.daemon_child {
+                if let Ok(Some(status)) = proc.try_wait() {
+                    thread::sleep(Duration::from_millis(50));
+                    if let Err(dev_err) = check_usb_device(&adb_bin) {
+                        return Err(dev_err);
+                    }
+                    let tail = format_recent_logs(&recent_logs);
+                    let msg = if tail.is_empty() {
+                        format!("Android capture server exited early ({})", status)
+                    } else {
+                        format!("Android capture server exited early ({}): {}", status, tail)
+                    };
+                    return Err(UsbCheckError::Other(msg));
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
 
         let sock_addr = SocketAddr::from(([127, 0, 0, 1], port));
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -688,7 +681,7 @@ impl AdbSessionGuard {
                 }
             }
 
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(120));
         }
 
         if let Err(dev_err) = check_usb_device(&adb_bin) {
@@ -708,6 +701,119 @@ impl AdbSessionGuard {
             )
         };
         Err(UsbCheckError::Other(detail))
+    }
+
+    /// Seamlessly reconnects the active USB mirroring stream in-place without closing the mirror
+    /// window or interrupting an active recording, provided the physical USB device is still attached.
+    pub fn try_reconnect_stream(
+        &mut self,
+        running: &AtomicBool,
+    ) -> Result<StreamReader<TcpStream>, UsbCheckError> {
+        let _pipeline_guard = pipeline_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Verify the physical USB device is still attached and authorized
+        let current_serial = check_usb_device(&self.adb_bin)?;
+        self.serial = current_serial;
+
+        let forward_spec = format!("tcp:{}", self.port);
+        let sock_addr = SocketAddr::from(([127, 0, 0, 1], self.port));
+
+        // 2. Fast path: if `com.mirror.Server` is still alive on the phone (waiting in `acceptClient()`),
+        // re-ensure `adb forward` and reconnect the TCP stream in <100ms without restarting `app_process`.
+        if self.is_server_alive() {
+            let _ = new_hidden_command(&self.adb_bin)
+                .args(["-s", &self.serial, "forward", &forward_spec, &forward_spec])
+                .output();
+
+            for _ in 0..4 {
+                if !running.load(Ordering::Relaxed) {
+                    return Err(UsbCheckError::Other("Session stopped".to_string()));
+                }
+                if !self.is_server_alive() {
+                    break;
+                }
+                if let Ok(stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(400))
+                {
+                    if let Ok(reader) = StreamReader::from_tcp_stream(stream) {
+                        println!(
+                            "[ADB] Fast in-place USB stream recovery succeeded ({}x{})",
+                            reader.header().width,
+                            reader.header().height
+                        );
+                        return Ok(reader);
+                    }
+                }
+                thread::sleep(Duration::from_millis(80));
+            }
+        }
+
+        // 3. Full in-place server restart if `app_process` exited while the phone is still plugged in
+        check_usb_device(&self.adb_bin)?;
+        if let Some(ref mut child) = self.daemon_child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.daemon_child = None;
+
+        kill_remote_server(&self.adb_bin, Some(&self.serial));
+        thread::sleep(Duration::from_millis(100));
+
+        let _ = new_hidden_command(&self.adb_bin)
+            .args(["-s", &self.serial, "forward", "--remove", &forward_spec])
+            .output();
+        let fwd_out = new_hidden_command(&self.adb_bin)
+            .args(["-s", &self.serial, "forward", &forward_spec, &forward_spec])
+            .output()
+            .map_err(|e| UsbCheckError::Other(format!("Failed to execute `adb forward`: {}", e)))?;
+
+        if !fwd_out.status.success() {
+            check_usb_device(&self.adb_bin)?;
+            return Err(UsbCheckError::Other("Failed to re-establish adb forward".to_string()));
+        }
+
+        let (child, _recent_logs, server_listening) =
+            spawn_remote_server_process(&self.adb_bin, &self.serial, self.port, self.quality)?;
+        self.daemon_child = Some(child);
+
+        let listen_deadline = Instant::now() + Duration::from_millis(2200);
+        while Instant::now() < listen_deadline && !server_listening.load(Ordering::Acquire) {
+            if !running.load(Ordering::Relaxed) {
+                return Err(UsbCheckError::Other("Session stopped".to_string()));
+            }
+            if !self.is_server_alive() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !running.load(Ordering::Relaxed) {
+                return Err(UsbCheckError::Other("Session stopped".to_string()));
+            }
+            if !self.is_server_alive() {
+                check_usb_device(&self.adb_bin)?;
+                return Err(UsbCheckError::Other(
+                    "Android server exited during in-place restart".to_string(),
+                ));
+            }
+            if let Ok(stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
+                if let Ok(reader) = StreamReader::from_tcp_stream(stream) {
+                    println!(
+                        "[ADB] In-place server restart succeeded ({}x{})",
+                        reader.header().width,
+                        reader.header().height
+                    );
+                    return Ok(reader);
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        check_usb_device(&self.adb_bin)?;
+        Err(UsbCheckError::Other(
+            "Timed out reconnecting in-place USB stream".to_string(),
+        ))
     }
 
     pub fn serial(&self) -> &str {
@@ -744,16 +850,23 @@ impl Drop for AdbSessionGuard {
             let _ = child.wait();
         }
 
-        // 2. Offload `adb forward --remove` and remote `app_process` cleanup onto a detached
-        // background thread so dropping `AdbSessionGuard` on the SDL3 UI thread never blocks
-        // even if `adbd` stalls during a sudden physical USB cable unplug.
+        // 2. Offload `adb forward --remove` and remote `app_process` cleanup onto a background
+        // thread synchronized via `pipeline_lock()` + `SESSION_GENERATION` so dropping
+        // `AdbSessionGuard` on the SDL3 UI thread never blocks AND never races with or kills
+        // a newly started session!
         let adb_path = self.adb_bin.clone();
         let serial = self.serial.clone();
         let port = self.port;
+        let generation = self.generation;
 
-        let spawn_res = thread::Builder::new()
+        let _ = thread::Builder::new()
             .name("adb-cleanup".to_string())
             .spawn(move || {
+                let _lock = pipeline_lock().lock().unwrap_or_else(|e| e.into_inner());
+                if SESSION_GENERATION.load(Ordering::SeqCst) != generation {
+                    // A newer session has already started (and handles its own cleanup under `pipeline_lock`).
+                    return;
+                }
                 let _ = new_hidden_command(&adb_path)
                     .args([
                         "-s",
@@ -767,21 +880,65 @@ impl Drop for AdbSessionGuard {
                     .status();
                 kill_remote_server(&adb_path, Some(&serial));
             });
-
-        if spawn_res.is_err() {
-            let _ = new_hidden_command(&self.adb_bin)
-                .args([
-                    "-s",
-                    &self.serial,
-                    "forward",
-                    "--remove",
-                    &format!("tcp:{}", self.port),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
     }
+}
+
+fn spawn_remote_server_process(
+    adb_bin: &Path,
+    serial: &str,
+    port: u16,
+    quality: StreamQualityConfig,
+) -> Result<(Child, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>), UsbCheckError> {
+    let remote_cmd = format!(
+        "CLASSPATH=/data/local/tmp/server.jar app_process / com.mirror.Server port={} max_size={} bitrate={} fps={} cbr={}",
+        port, quality.max_size, quality.bitrate, quality.fps, quality.cbr
+    );
+    let mut child = new_hidden_command(adb_bin)
+        .args(["-s", serial, "shell", &remote_cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            UsbCheckError::Other(format!(
+                "Failed to spawn `app_process` server daemon: {}",
+                e
+            ))
+        })?;
+
+    let recent_logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::with_capacity(16)));
+    let server_listening = Arc::new(AtomicBool::new(false));
+
+    if let Some(stdout) = child.stdout.take() {
+        let logs_ref = Arc::clone(&recent_logs);
+        let listen_ref = Arc::clone(&server_listening);
+        let _ = thread::Builder::new()
+            .name("adb-server-stdout".to_string())
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    if line.contains("Listening on 127.0.0.1:") {
+                        listen_ref.store(true, Ordering::Release);
+                    }
+                    println!("{}", line);
+                    push_log_line(&logs_ref, line);
+                }
+            });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let logs_ref = Arc::clone(&recent_logs);
+        let _ = thread::Builder::new()
+            .name("adb-server-stderr".to_string())
+            .spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    eprintln!("{}", line);
+                    push_log_line(&logs_ref, line);
+                }
+            });
+    }
+
+    Ok((child, recent_logs, server_listening))
 }
 
 fn is_cancelled(running: Option<&AtomicBool>) -> bool {
@@ -820,8 +977,9 @@ fn format_recent_logs(logs: &Arc<Mutex<Vec<String>>>) -> String {
 }
 
 fn kill_remote_server(adb_bin: &Path, serial: Option<&str>) {
-    let kill_script = "for pid in $(pidof app_process64 app_process32 app_process 2>/dev/null); do \
-        if grep -q 'com.mirror.Server' /proc/$pid/cmdline 2>/dev/null; then kill -9 $pid 2>/dev/null; fi; \
+    let kill_script = "pkill -9 -f 'com.mirror.Server' 2>/dev/null; \
+        for pid in $(pidof app_process64 app_process32 app_process 2>/dev/null); do \
+        if tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q 'com.mirror.Server'; then kill -9 $pid 2>/dev/null; fi; \
         done";
     let mut cmd = new_hidden_command(adb_bin);
     if let Some(s) = serial {
@@ -834,8 +992,26 @@ fn kill_remote_server(adb_bin: &Path, serial: Option<&str>) {
         .status();
 }
 
-/// Locates the `adb` executable on system `PATH` or inside standard Android SDK directories.
+/// Locates the `adb` executable bundled alongside the app, on system `PATH`, or inside standard Android SDK directories.
 pub fn locate_adb_binary() -> Result<PathBuf, UsbCheckError> {
+    let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
+
+    // 0. Prefer bundled `adb` next to the executable (zero-setup Windows installer layout)
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let bundled_candidates = [
+                exe_dir.join(exe_name),
+                exe_dir.join("platform-tools").join(exe_name),
+                exe_dir.join("adb").join(exe_name),
+            ];
+            for candidate in bundled_candidates {
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
     // 1. Check `adb` on system PATH
     if let Ok(out) = new_hidden_command("adb").arg("version").output() {
         if out.status.success() {
@@ -864,7 +1040,6 @@ pub fn locate_adb_binary() -> Result<PathBuf, UsbCheckError> {
         );
     }
 
-    let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
     for root in sdk_roots {
         let candidate = root.join("platform-tools").join(exe_name);
         if candidate.is_file() {
@@ -982,7 +1157,9 @@ pub fn locate_artifact_file(relative_path: &str) -> Option<PathBuf> {
 }
 
 fn locate_or_build_server_jar() -> Result<PathBuf, String> {
-    if let Some(jar) = locate_artifact_file("server/server.jar") {
+    if let Some(jar) = locate_artifact_file("server.jar")
+        .or_else(|| locate_artifact_file("server/server.jar"))
+    {
         return Ok(jar);
     }
 

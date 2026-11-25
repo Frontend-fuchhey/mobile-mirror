@@ -39,7 +39,7 @@ impl NalSplitter {
         };
 
         let (decoder_tx, decoder_rx) = if enable_decoder {
-            let (tx, rx) = mpsc::sync_channel(128);
+            let (tx, rx) = mpsc::sync_channel(512);
             (Some(tx), Some(rx))
         } else {
             (None, None)

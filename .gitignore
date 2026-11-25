@@ -21,3 +21,6 @@ Thumbs.db
 
 # Persistent settings
 recordings/*.cfg
+
+# Installer staging & build output
+dist/

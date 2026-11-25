@@ -1,17 +1,25 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 pub mod adb;
+pub mod airplay;
 pub mod decoder;
+pub mod device;
 pub mod ffi;
+pub mod ios_usb;
 pub mod muxer;
 pub mod protocol;
 pub mod renderer;
 pub mod settings;
 pub mod splitter;
+pub mod thumbnail;
 pub mod ui_canvas;
 
-use crate::adb::{AdbSessionGuard, UsbAutoConnector, UsbStatus};
 use crate::decoder::HwDecoder;
+use crate::device::{DeviceStatus, UnifiedDeviceConnector};
 use crate::muxer::NativeIsoMp4Muxer;
-use crate::protocol::{ControlWriter, NalPacket, StreamHeader, StreamReader};
+use crate::protocol::{
+    ControlWriter, DevicePlatform, NalPacket, PacketSource, StreamHeader, StreamReader,
+};
 use crate::renderer::{
     DashboardViewState, Sdl3AudioPlayer, Sdl3Renderer, UiAction, DASHBOARD_HEIGHT, DASHBOARD_WIDTH,
 };
@@ -22,7 +30,6 @@ use crate::settings::{
 use crate::splitter::NalSplitter;
 
 use std::env;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -252,7 +259,7 @@ fn main() {
         };
         let mut last_saved = None;
         let _ = run_streaming_session(
-            reader,
+            Box::new(reader),
             None,
             &config,
             &mut settings,
@@ -280,14 +287,14 @@ fn main() {
     let mut force_immediate_connect = false;
 
     loop {
-        let (reader, _adb_guard) = match run_startup_ui(
+        let source = match run_startup_ui(
             &mut renderer,
             &config,
             &mut settings,
             &mut last_saved_recording,
             force_immediate_connect,
         ) {
-            Some(pair) => pair,
+            Some(src) => src,
             None => {
                 println!("[Mobile Mirror] Closed.");
                 return;
@@ -296,14 +303,12 @@ fn main() {
         force_immediate_connect = false;
 
         let outcome = run_streaming_session(
-            reader,
+            source,
             Some(&mut renderer),
             &config,
             &mut settings,
             &mut last_saved_recording,
         );
-        // Dropping `_adb_guard` deterministically cleans up `adb forward` and `app_process`.
-        drop(_adb_guard);
 
         if outcome == SessionOutcome::UserQuit || config.max_packets.is_some() {
             break;
@@ -335,19 +340,21 @@ fn main() {
     }
 }
 
-/// Runs the 60 FPS Bento Dashboard UI while `UsbAutoConnector` probes and initializes
-/// the Android USB session asynchronously in the background.
+/// Runs the 60 FPS Bento Dashboard UI while `UnifiedDeviceConnector` probes and initializes
+/// Android USB, iOS USB, and iOS AirPlay sessions asynchronously in the background.
 fn run_startup_ui(
     renderer: &mut Sdl3Renderer,
     config: &ClientConfig,
     settings: &mut AppSettings,
     last_saved_recording: &mut Option<String>,
     force_immediate_connect: bool,
-) -> Option<(StreamReader<TcpStream>, AdbSessionGuard)> {
-    let mut connector = UsbAutoConnector::new_with_config(
+) -> Option<Box<dyn PacketSource>> {
+    let mut connector = UnifiedDeviceConnector::new(
         config.port,
         settings.to_stream_quality(),
         settings.auto_connect_usb || force_immediate_connect,
+        settings.airplay_enabled,
+        "Mobile Mirror",
     );
     if force_immediate_connect {
         connector.trigger_connect_now();
@@ -358,7 +365,6 @@ fn run_startup_ui(
         for action in actions {
             match action {
                 UiAction::Quit => {
-                    connector.stop();
                     return None;
                 }
                 UiAction::MinimizeWindow => renderer.minimize_window(),
@@ -368,12 +374,12 @@ fn run_startup_ui(
                     settings.fullscreen_mirror = true;
                     settings.auto_connect_usb = true;
                     settings.save(&config.record_dir);
-                    connector.set_auto_connect(true);
+                    connector.set_auto_connect_usb(true);
                     connector.set_quality(settings.to_stream_quality());
                     connector.trigger_connect_now();
-                    if connector.device_serial().is_none() {
+                    if connector.latest_device_serial().is_none() {
                         renderer.show_toast(
-                            "Scanning USB... Connect your Android phone with USB debugging enabled",
+                            "Scanning USB (Android/iOS)... or mirror via AirPlay",
                         );
                     } else {
                         renderer.show_toast("Starting USB screen mirroring...");
@@ -381,14 +387,14 @@ fn run_startup_ui(
                 }
                 UiAction::StopMirroring => {
                     settings.auto_connect_usb = false;
-                    connector.set_auto_connect(false);
+                    connector.set_auto_connect_usb(false);
                 }
                 UiAction::ToggleRecord => {
                     settings.auto_record = !settings.auto_record;
                     settings.save(&config.record_dir);
                     if settings.auto_record {
                         settings.auto_connect_usb = true;
-                        connector.set_auto_connect(true);
+                        connector.set_auto_connect_usb(true);
                         connector.trigger_connect_now();
                         renderer.show_toast(
                             "Auto-Record ON: Recording will start automatically when mirroring begins",
@@ -419,10 +425,11 @@ fn run_startup_ui(
                 }
                 UiAction::SwitchTab(tab) => {
                     renderer.active_tab = tab;
-                    if tab == NavTab::Recordings || tab == NavTab::About {
+                    if tab == NavTab::Recordings {
                         renderer.refresh_recordings_if_needed(&config.record_dir, true);
                     }
                 }
+                UiAction::SwitchSettingsSection(_) | UiAction::OpenHelpInSettings => {}
                 UiAction::OpenRecordingsFolder => {
                     open_folder_in_explorer(&config.record_dir);
                     renderer.active_tab = NavTab::Recordings;
@@ -441,6 +448,12 @@ fn run_startup_ui(
                         renderer.refresh_recordings_if_needed(&config.record_dir, true);
                         renderer.show_toast("Deleted recording");
                     }
+                }
+                UiAction::PrevRecordingsPage => {
+                    renderer.recordings_page = renderer.recordings_page.saturating_sub(1);
+                }
+                UiAction::NextRecordingsPage => {
+                    renderer.recordings_page = renderer.recordings_page.saturating_add(1);
                 }
                 UiAction::CycleFps => {
                     settings.cycle_fps();
@@ -479,11 +492,21 @@ fn run_startup_ui(
                 UiAction::ToggleAutoConnect => {
                     settings.auto_connect_usb = !settings.auto_connect_usb;
                     settings.save(&config.record_dir);
-                    connector.set_auto_connect(settings.auto_connect_usb);
+                    connector.set_auto_connect_usb(settings.auto_connect_usb);
                     renderer.show_toast(if settings.auto_connect_usb {
                         "Auto-Connect on USB Plug: ON"
                     } else {
                         "Auto-Connect on USB Plug: OFF"
+                    });
+                }
+                UiAction::ToggleAirPlay => {
+                    settings.airplay_enabled = !settings.airplay_enabled;
+                    settings.save(&config.record_dir);
+                    connector.set_airplay_enabled(settings.airplay_enabled);
+                    renderer.show_toast(if settings.airplay_enabled {
+                        "AirPlay Receiver: ON (Select 'Mobile Mirror' on iPhone)"
+                    } else {
+                        "AirPlay Receiver: OFF"
                     });
                 }
                 UiAction::ToggleAutoRecord => {
@@ -525,16 +548,17 @@ fn run_startup_ui(
                     settings.save(&config.record_dir);
                     renderer.set_always_on_top(false);
                     connector.set_quality(settings.to_stream_quality());
-                    connector.set_auto_connect(true);
+                    connector.set_auto_connect_usb(settings.auto_connect_usb);
+                    connector.set_airplay_enabled(settings.airplay_enabled);
                     renderer.show_toast("Settings reset to defaults");
                 }
             }
         }
 
-        if let Some(UsbStatus::Connected(reader, adb_guard)) = connector.poll_status() {
+        if let Some(DeviceStatus::Connected(source)) = connector.poll_status() {
             renderer.active_tab = NavTab::Home;
             settings.fullscreen_mirror = true;
-            return Some((reader, adb_guard));
+            return Some(source);
         }
 
         renderer.refresh_recordings_if_needed(&config.record_dir, false);
@@ -548,12 +572,14 @@ fn run_startup_ui(
         let view_state = DashboardViewState {
             active_tab: renderer.active_tab,
             settings,
-            headline: connector.headline(),
-            subtext: connector.subtext(),
-            is_connecting: connector.is_connecting(),
-            is_warning: connector.is_warning(),
+            headline: connector.latest_headline(),
+            subtext: connector.latest_subtext(),
+            is_connecting: connector.latest_is_connecting(),
+            is_warning: connector.latest_is_warning(),
             is_mirroring: false,
-            device_serial: connector.device_serial(),
+            device_serial: connector.latest_device_serial(),
+            platform_label: connector.latest_platform().map(|p| p.label()),
+            airplay_listening: connector.is_airplay_listening(),
             is_recording: false,
             rec_elapsed_secs: 0,
             last_saved_recording: last_saved_recording.as_deref(),
@@ -562,6 +588,8 @@ fn run_startup_ui(
             fps: settings.target_fps,
             recordings: &recs_snapshot,
             status_toast: toast_msg.as_deref(),
+            thumbnails: None,
+            recordings_page: renderer.recordings_page,
         };
         renderer.render_dashboard(&view_state);
 
@@ -570,17 +598,24 @@ fn run_startup_ui(
 }
 
 fn run_streaming_session(
-    mut reader: StreamReader<TcpStream>,
+    mut source: Box<dyn PacketSource>,
     existing_renderer: Option<&mut Sdl3Renderer>,
     config: &ClientConfig,
     settings: &mut AppSettings,
     last_saved_recording: &mut Option<String>,
 ) -> SessionOutcome {
-    let header = reader.header();
-    let control_writer = reader.take_control_writer();
+    let header = source.header();
+    let platform = source.platform();
+    let device_name = source.device_name().to_string();
+    let control_writer = source.control_writer();
+    let control_writer_shutdown = control_writer.clone();
     println!(
-        "[Mobile Mirror] Live USB stream active: {}x{} (codec=0x{:08x})",
-        header.width, header.height, header.codec_id
+        "[Mobile Mirror] Live {} stream active ({}): {}x{} (codec=0x{:08x})",
+        platform.label(),
+        device_name,
+        header.width,
+        header.height,
+        header.codec_id
     );
 
     let running = Arc::new(AtomicBool::new(true));
@@ -597,9 +632,9 @@ fn run_streaming_session(
         .spawn(move || {
             let mut count = 0u64;
             while running_net.load(Ordering::Relaxed) {
-                match reader.next_packet() {
+                match source.read_packet() {
                     Ok(Some(packet)) => {
-                        splitter.dispatch(packet);
+                        splitter.dispatch(Arc::new(packet));
                         count += 1;
                         if let Some(limit) = max_packets {
                             if count >= limit {
@@ -607,25 +642,23 @@ fn run_streaming_session(
                             }
                         }
                     }
-                    Ok(None) => {
-                        println!("[Mobile Mirror] Android USB stream closed.");
-                        break;
-                    }
-                    Err(e) => {
-                        if running_net.load(Ordering::Relaxed) {
-                            eprintln!("[Mobile Mirror] USB stream read ended: {}", e);
-                        }
+                    Ok(None) | Err(_) => {
+                        println!("[Mobile Mirror] {} stream closed.", source.platform().label());
                         break;
                     }
                 }
             }
             running_net.store(false, Ordering::SeqCst);
+            source.shutdown();
+            drop(source);
         })
         .expect("Failed to spawn network ingest thread");
 
     let outcome = if let Some(rx) = decoder_rx {
         run_playback_loop(
             header,
+            platform,
+            &device_name,
             existing_renderer,
             &config.record_dir,
             settings,
@@ -635,11 +668,12 @@ fn run_streaming_session(
             Arc::clone(&running),
         )
     } else {
-        let _ = net_handle.join();
         SessionOutcome::UserQuit
     };
 
     running.store(false, Ordering::SeqCst);
+    control_writer_shutdown.shutdown();
+    let _ = net_handle.join();
 
     println!(
         "[Mobile Mirror] Session summary — Packets: {}, Bytes: {}, Dropped: {}",
@@ -667,6 +701,8 @@ enum RecorderCommand {
 #[allow(clippy::too_many_arguments)]
 fn run_playback_loop(
     header: StreamHeader,
+    platform: DevicePlatform,
+    device_name: &str,
     existing_renderer: Option<&mut Sdl3Renderer>,
     record_dir: &Path,
     settings: &mut AppSettings,
@@ -675,6 +711,7 @@ fn run_playback_loop(
     rx: Receiver<Arc<NalPacket>>,
     running: Arc<AtomicBool>,
 ) -> SessionOutcome {
+    let mic_active = Arc::new(AtomicBool::new(settings.mic_enabled));
     let mut decoder = match HwDecoder::new(settings.hw_backend.cli_value()) {
         Ok(d) => d,
         Err(e) => {
@@ -795,6 +832,7 @@ fn run_playback_loop(
     let mut current_fps = settings.target_fps;
     let mut last_second = Instant::now();
     let mut last_title_update = Instant::now();
+    let mut last_window_title = String::from("Mobile Mirror");
     let mut last_idle_render = Instant::now();
     let mut last_rec_elapsed_secs = 0u64;
     let mut session_outcome = SessionOutcome::Disconnected;
@@ -844,6 +882,7 @@ fn run_playback_loop(
                 }
                 UiAction::ToggleMic => {
                     settings.mic_enabled = !settings.mic_enabled;
+                    mic_active.store(settings.mic_enabled, Ordering::Relaxed);
                     settings.save(record_dir);
                     control_writer.set_mic_enabled(settings.mic_enabled);
                     renderer.show_toast(if settings.mic_enabled {
@@ -898,10 +937,11 @@ fn run_playback_loop(
                 }
                 UiAction::SwitchTab(tab) => {
                     renderer.active_tab = tab;
-                    if tab == NavTab::Recordings || tab == NavTab::About {
+                    if tab == NavTab::Recordings {
                         renderer.refresh_recordings_if_needed(record_dir, true);
                     }
                 }
+                UiAction::SwitchSettingsSection(_) | UiAction::OpenHelpInSettings => {}
                 UiAction::OpenRecordingsFolder => {
                     open_folder_in_explorer(record_dir);
                     renderer.active_tab = NavTab::Recordings;
@@ -914,6 +954,12 @@ fn run_playback_loop(
                         renderer.refresh_recordings_if_needed(record_dir, true);
                         renderer.show_toast("Deleted recording");
                     }
+                }
+                UiAction::PrevRecordingsPage => {
+                    renderer.recordings_page = renderer.recordings_page.saturating_sub(1);
+                }
+                UiAction::NextRecordingsPage => {
+                    renderer.recordings_page = renderer.recordings_page.saturating_add(1);
                 }
                 UiAction::CycleFps => {
                     settings.cycle_fps();
@@ -950,6 +996,15 @@ fn run_playback_loop(
                 UiAction::ToggleAutoConnect => {
                     settings.auto_connect_usb = !settings.auto_connect_usb;
                     settings.save(record_dir);
+                }
+                UiAction::ToggleAirPlay => {
+                    settings.airplay_enabled = !settings.airplay_enabled;
+                    settings.save(record_dir);
+                    renderer.show_toast(if settings.airplay_enabled {
+                        "AirPlay Receiver: ON (takes effect when idle)"
+                    } else {
+                        "AirPlay Receiver: OFF"
+                    });
                 }
                 UiAction::ToggleAutoRecord => {
                     settings.auto_record = !settings.auto_record;
@@ -1021,16 +1076,21 @@ fn run_playback_loop(
             } else {
                 "Mobile Mirror".to_string()
             };
-            renderer.set_title(&title);
+            if title != last_window_title {
+                renderer.set_title(&title);
+                last_window_title = title;
+            }
             last_title_update = Instant::now();
         }
 
         let first_packet = match rx.recv_timeout(Duration::from_millis(4)) {
             Ok(pkt) => pkt,
             Err(RecvTimeoutError::Timeout) => {
-                // Only redraw on timeout when UI state changed or at a gentle poll rate
-                // so idle redraws never compete with incoming video packets.
-                if ui_dirty || last_idle_render.elapsed() >= Duration::from_millis(16) {
+                // Only redraw on timeout when UI state or hover zone changed, or at a gentle 80ms keepalive
+                // so idle redraws never compete with incoming 60/90/120 FPS video frames.
+                let (mx, my) = renderer.mouse_position();
+                let hover_changed = renderer.is_hovered_zone_changed(mx, my);
+                if ui_dirty || hover_changed || last_idle_render.elapsed() >= Duration::from_millis(80) {
                     let toast_msg = renderer.active_toast().map(|s| s.to_string());
                     let recs_snapshot = if renderer.active_tab == NavTab::Recordings {
                         renderer.cached_recordings.clone()
@@ -1040,12 +1100,18 @@ fn run_playback_loop(
                     let view_state = DashboardViewState {
                         active_tab: renderer.active_tab,
                         settings,
-                        headline: "Connected via USB",
+                        headline: match platform {
+                            DevicePlatform::AndroidUsb => "Connected via Android USB",
+                            DevicePlatform::IosUsb => "Connected via iOS USB",
+                            DevicePlatform::IosAirPlay => "Connected via AirPlay",
+                        },
                         subtext: "Live hardware video stream active",
                         is_connecting: false,
                         is_warning: false,
                         is_mirroring: true,
-                        device_serial: None,
+                        device_serial: Some(device_name),
+                        platform_label: Some(platform.label()),
+                        airplay_listening: settings.airplay_enabled,
                         is_recording,
                         rec_elapsed_secs,
                         last_saved_recording: last_saved_recording.as_deref(),
@@ -1054,6 +1120,8 @@ fn run_playback_loop(
                         fps: current_fps,
                         recordings: &recs_snapshot,
                         status_toast: toast_msg.as_deref(),
+                        thumbnails: None,
+                        recordings_page: renderer.recordings_page,
                     };
                     renderer.render_dashboard(&view_state);
                     last_idle_render = Instant::now();
@@ -1063,9 +1131,8 @@ fn run_playback_loop(
             Err(RecvTimeoutError::Disconnected) => break,
         };
 
-        // Drain all queued packets (up to 64 per batch) so the channel never accumulates lag.
-        // Every H.264 NAL packet is fed to `decoder` in exact sequence to preserve P-frame
-        // reference integrity, while only the freshest decoded frame is uploaded and rendered.
+        // Process queued packets while preserving smooth 1:1 frame presentation when on time (<22ms),
+        // and draining up to 64 packets only when catching up from a real backlog (>=22ms).
         let mut decoded_any_frame = false;
         let mut batch_count = 0usize;
         let mut next_pkt = Some(first_packet);
@@ -1101,6 +1168,9 @@ fn run_playback_loop(
             if batch_count >= 64 {
                 break;
             }
+            if decoded_any_frame && packet.received_at.elapsed() < Duration::from_millis(22) {
+                break;
+            }
             next_pkt = rx.try_recv().ok();
         }
 
@@ -1122,12 +1192,18 @@ fn run_playback_loop(
             let view_state = DashboardViewState {
                 active_tab: renderer.active_tab,
                 settings,
-                headline: "Connected via USB",
+                headline: match platform {
+                    DevicePlatform::AndroidUsb => "Connected via Android USB",
+                    DevicePlatform::IosUsb => "Connected via iOS USB",
+                    DevicePlatform::IosAirPlay => "Connected via AirPlay",
+                },
                 subtext: "Live hardware video stream active",
                 is_connecting: false,
                 is_warning: false,
                 is_mirroring: true,
-                device_serial: None,
+                device_serial: Some(device_name),
+                platform_label: Some(platform.label()),
+                airplay_listening: settings.airplay_enabled,
                 is_recording,
                 rec_elapsed_secs,
                 last_saved_recording: last_saved_recording.as_deref(),
@@ -1136,6 +1212,8 @@ fn run_playback_loop(
                 fps: current_fps,
                 recordings: &recs_snapshot,
                 status_toast: toast_msg.as_deref(),
+                thumbnails: None,
+                recordings_page: renderer.recordings_page,
             };
             renderer.render_dashboard(&view_state);
             last_idle_render = Instant::now();

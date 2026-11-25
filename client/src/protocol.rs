@@ -1,27 +1,57 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Bidirectional control channel back to the Android server (e.g. toggling phone microphone).
+#[derive(Clone)]
 pub struct ControlWriter {
-    stream: Option<TcpStream>,
+    stream: Arc<Mutex<Option<TcpStream>>>,
 }
 
 impl ControlWriter {
+    pub fn new(stream: Option<TcpStream>) -> Self {
+        Self {
+            stream: Arc::new(Mutex::new(stream)),
+        }
+    }
+
+    /// Creates a no-op control writer for platforms without a back-channel (e.g. iOS).
+    pub fn noop() -> Self {
+        Self::new(None)
+    }
+
+    pub fn replace_stream(&self, new_stream: Option<TcpStream>) {
+        if let Ok(mut guard) = self.stream.lock() {
+            *guard = new_stream;
+        }
+    }
+
     pub fn set_mic_enabled(&mut self, enabled: bool) {
-        if let Some(ref mut s) = self.stream {
-            let cmd: [u8; 1] = [if enabled { 1 } else { 0 }];
-            let _ = s.write_all(&cmd);
-            let _ = s.flush();
+        if let Ok(mut guard) = self.stream.lock() {
+            if let Some(ref mut s) = *guard {
+                let cmd: [u8; 1] = [if enabled { 1 } else { 0 }];
+                let _ = s.write_all(&cmd);
+                let _ = s.flush();
+            }
         }
     }
 
     pub fn request_keyframe(&mut self) {
-        if let Some(ref mut s) = self.stream {
-            let cmd: [u8; 1] = [b'K'];
-            let _ = s.write_all(&cmd);
-            let _ = s.flush();
+        if let Ok(mut guard) = self.stream.lock() {
+            if let Some(ref mut s) = *guard {
+                let cmd: [u8; 1] = [b'K'];
+                let _ = s.write_all(&cmd);
+                let _ = s.flush();
+            }
+        }
+    }
+
+    pub fn shutdown(&self) {
+        if let Ok(guard) = self.stream.lock() {
+            if let Some(ref s) = *guard {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 }
@@ -51,6 +81,66 @@ pub struct NalPacket {
     pub is_audio: bool,
     pub payload: Arc<[u8]>,
     pub received_at: Instant,
+}
+
+/// Physical or wireless transport platform for a connected mobile device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePlatform {
+    AndroidUsb,
+    IosUsb,
+    IosAirPlay,
+}
+
+impl DevicePlatform {
+    pub fn label(self) -> &'static str {
+        match self {
+            DevicePlatform::AndroidUsb => "Android USB",
+            DevicePlatform::IosUsb => "iOS USB",
+            DevicePlatform::IosAirPlay => "iOS AirPlay",
+        }
+    }
+}
+
+/// Platform-agnostic video/audio packet source consumed by the decoder and muxer pipeline.
+pub trait PacketSource: Send {
+    fn header(&self) -> StreamHeader;
+    fn read_packet(&mut self) -> io::Result<Option<NalPacket>>;
+    fn control_writer(&self) -> ControlWriter;
+    fn platform(&self) -> DevicePlatform;
+    fn device_name(&self) -> &str;
+    fn shutdown(&mut self) {}
+}
+
+impl PacketSource for StreamReader<TcpStream> {
+    fn header(&self) -> StreamHeader {
+        self.header
+    }
+
+    fn read_packet(&mut self) -> io::Result<Option<NalPacket>> {
+        match self.next_packet()? {
+            Some(arc_pkt) => Ok(Some(Arc::try_unwrap(arc_pkt).unwrap_or_else(|a| (*a).clone()))),
+            None => Ok(None),
+        }
+    }
+
+    fn control_writer(&self) -> ControlWriter {
+        ControlWriter::new(self.control_stream.as_ref().and_then(|s| s.try_clone().ok()))
+    }
+
+    fn platform(&self) -> DevicePlatform {
+        DevicePlatform::AndroidUsb
+    }
+
+    fn device_name(&self) -> &str {
+        "Android Device"
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.reader.shutdown(std::net::Shutdown::Both);
+        if let Some(ref s) = self.control_stream {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 /// Connects to the forwarded ADB server socket and reads framed or raw Annex-B NAL packets.
@@ -102,9 +192,11 @@ impl StreamReader<TcpStream> {
     }
 
     pub fn take_control_writer(&mut self) -> ControlWriter {
-        ControlWriter {
-            stream: self.control_stream.take(),
-        }
+        ControlWriter::new(self.control_stream.take())
+    }
+
+    pub fn take_control_stream(&mut self) -> Option<TcpStream> {
+        self.control_stream.take()
     }
 }
 
@@ -184,7 +276,7 @@ impl<R: Read> StreamReader<R> {
         }
 
         let mut buf = vec![0u8; size];
-        self.reader.read_exact(&mut buf)?;
+        read_exact_resilient(&mut self.reader, &mut buf)?;
 
         let is_config = (pts_and_flags & PACKET_FLAG_CONFIG) != 0;
         let is_keyframe = (pts_and_flags & PACKET_FLAG_KEY_FRAME) != 0;
@@ -252,6 +344,7 @@ impl<R: Read> StreamReader<R> {
 
 fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<bool> {
     let mut read = 0;
+    let mut transient_retries = 0u32;
     while read < buf.len() {
         match reader.read(&mut buf[read..]) {
             Ok(0) => {
@@ -263,12 +356,57 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<bool
                     "Unexpected EOF in packet header",
                 ));
             }
-            Ok(n) => read += n,
+            Ok(n) => {
+                read += n;
+                transient_retries = 0;
+            }
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) && transient_retries < 16 =>
+            {
+                transient_retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
             Err(e) => return Err(e),
         }
     }
     Ok(true)
+}
+
+fn read_exact_resilient<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<()> {
+    let mut read = 0;
+    let mut transient_retries = 0u32;
+    while read < buf.len() {
+        match reader.read(&mut buf[read..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Unexpected EOF in packet payload",
+                ));
+            }
+            Ok(n) => {
+                read += n;
+                transient_retries = 0;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) && transient_retries < 16 =>
+            {
+                transient_retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Scans an Annex-B byte buffer for individual NAL units (without start codes).
@@ -491,6 +629,54 @@ mod tests {
         let pkt_p = reader.next_packet().unwrap().unwrap();
         assert!(!pkt_p.is_keyframe);
         assert!(!pkt_p.is_config);
+
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn test_device_platform_labels_and_noop_control() {
+        assert_eq!(DevicePlatform::AndroidUsb.label(), "Android USB");
+        assert_eq!(DevicePlatform::IosUsb.label(), "iOS USB");
+        assert_eq!(DevicePlatform::IosAirPlay.label(), "iOS AirPlay");
+
+        let mut noop = ControlWriter::noop();
+        noop.set_mic_enabled(true);
+        noop.request_keyframe();
+        noop.shutdown();
+    }
+
+    #[test]
+    fn test_packet_source_for_stream_reader_tcp() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let sender = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(addr).unwrap();
+            let mut wire = Vec::new();
+            wire.extend_from_slice(&CODEC_ID_H264.to_be_bytes());
+            wire.extend_from_slice(&1280u32.to_be_bytes());
+            wire.extend_from_slice(&720u32.to_be_bytes());
+            let idr = b"\x00\x00\x00\x01\x65\x88\x84\x21";
+            wire.extend_from_slice(&(PACKET_FLAG_KEY_FRAME | 42).to_be_bytes());
+            wire.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+            wire.extend_from_slice(idr);
+            client.write_all(&wire).unwrap();
+        });
+
+        let (accepted, _) = listener.accept().unwrap();
+        let mut source: Box<dyn PacketSource> =
+            Box::new(StreamReader::from_tcp_stream(accepted).unwrap());
+        assert_eq!(source.platform(), DevicePlatform::AndroidUsb);
+        assert_eq!(source.device_name(), "Android Device");
+        assert_eq!(source.header().width, 1280);
+        assert_eq!(source.header().height, 720);
+
+        let pkt = source.read_packet().unwrap().unwrap();
+        assert!(pkt.is_keyframe);
+        assert_eq!(pkt.pts_us, 42);
+        assert!(source.read_packet().unwrap().is_none());
+        source.shutdown();
 
         sender.join().unwrap();
     }

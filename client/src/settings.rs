@@ -13,7 +13,6 @@ pub enum NavTab {
     Home,
     Recordings,
     Settings,
-    About,
 }
 
 /// Mirror quality preset matching the right-hand `Mirror Quality` card (`Auto` | `HD` | `FHD`).
@@ -127,6 +126,7 @@ pub struct AppSettings {
     pub always_on_top: bool,
     pub hw_backend: HwBackendPref,
     pub fullscreen_mirror: bool,
+    pub airplay_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -143,6 +143,7 @@ impl Default for AppSettings {
             always_on_top: false,
             hw_backend: HwBackendPref::Auto,
             fullscreen_mirror: true,
+            airplay_enabled: true,
         }
     }
 }
@@ -219,6 +220,7 @@ impl AppSettings {
                     "always_on_top" => s.always_on_top = val.eq_ignore_ascii_case("true"),
                     "hw_backend" => s.hw_backend = HwBackendPref::from_opt_str(Some(val)),
                     "fullscreen_mirror" => s.fullscreen_mirror = val.eq_ignore_ascii_case("true"),
+                    "airplay_enabled" => s.airplay_enabled = val.eq_ignore_ascii_case("true"),
                     _ => {}
                 }
             }
@@ -241,7 +243,8 @@ impl AppSettings {
              auto_record={}\n\
              always_on_top={}\n\
              hw_backend={}\n\
-             fullscreen_mirror={}\n",
+             fullscreen_mirror={}\n\
+             airplay_enabled={}\n",
             self.quality.label(),
             self.target_fps,
             self.bitrate_mbps,
@@ -253,6 +256,7 @@ impl AppSettings {
             self.always_on_top,
             self.hw_backend.cli_value().unwrap_or("auto"),
             self.fullscreen_mirror,
+            self.airplay_enabled,
         );
         let _ = fs::write(path, data);
     }

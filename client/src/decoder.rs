@@ -235,7 +235,7 @@ impl HwDecoder {
             (*self.pkt).pts = packet.pts_us as i64;
             (*self.pkt).dts = packet.pts_us as i64;
 
-            let send_ret = (self.api.avcodec_send_packet)(self.codec_ctx, self.pkt);
+            let mut send_ret = (self.api.avcodec_send_packet)(self.codec_ctx, self.pkt);
             if send_ret < 0 && send_ret != AVERROR_EAGAIN {
                 return Err(format!("avcodec_send_packet error: {}", send_ret));
             }
@@ -256,6 +256,25 @@ impl HwDecoder {
                 self.has_frame = true;
                 self.sw_frame_valid = false;
                 decoded_any = true;
+            }
+
+            if send_ret == AVERROR_EAGAIN {
+                send_ret = (self.api.avcodec_send_packet)(self.codec_ctx, self.pkt);
+                if send_ret == 0 {
+                    loop {
+                        (self.api.av_frame_unref)(self.recv_frame);
+                        let recv_ret =
+                            (self.api.avcodec_receive_frame)(self.codec_ctx, self.recv_frame);
+                        if recv_ret == AVERROR_EAGAIN || recv_ret == AVERROR_EOF || recv_ret < 0 {
+                            break;
+                        }
+                        (self.api.av_frame_unref)(self.raw_frame);
+                        std::mem::swap(&mut self.raw_frame, &mut self.recv_frame);
+                        self.has_frame = true;
+                        self.sw_frame_valid = false;
+                        decoded_any = true;
+                    }
+                }
             }
             Ok(decoded_any)
         }
