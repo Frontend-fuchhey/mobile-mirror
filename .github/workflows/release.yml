@@ -332,15 +332,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.meta.outputs.tag }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
+          REPO="${{ github.repository }}"
+          ls -la artifacts
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$REPO" \
               artifacts/MobileMirror-Setup.exe \
               artifacts/MobileMirror-macOS.dmg \
               artifacts/MobileMirror-Linux-x86_64.tar.gz \
               --clobber
           else
-            gh release create "$TAG" \
+            gh release create "$TAG" --repo "$REPO" \
               artifacts/MobileMirror-Setup.exe \
               artifacts/MobileMirror-macOS.dmg \
               artifacts/MobileMirror-Linux-x86_64.tar.gz \
