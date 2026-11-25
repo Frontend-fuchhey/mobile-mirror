@@ -85,7 +85,8 @@ jobs:
       - name: Install SDL3, FFmpeg, ADB, and dylibbundler via Homebrew
         run: |
           brew update
-          brew install sdl3 ffmpeg android-platform-tools dylibbundler
+          brew install sdl3 ffmpeg dylibbundler
+          brew install --cask android-platform-tools || true
 
       - name: Build release client binary
         working-directory: client
@@ -122,10 +123,10 @@ jobs:
             dylibbundler -of -b -x "$lib" -d "$APP/Contents/Frameworks" -p "@loader_path/" || true
           done
 
-          # Generate macOS .icns icon from app_icon.png
+          # Generate macOS .icns icon from app_icon.png (exact iconutil sizes)
           ICONSET="dist/AppIcon.iconset"
           mkdir -p "$ICONSET"
-          for sz in 16 32 64 128 256 512; do
+          for sz in 16 32 128 256 512; do
             sips -z $sz $sz client/assets/app_icon.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
             sz2=$((sz * 2))
             sips -z $sz2 $sz2 client/assets/app_icon.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
@@ -230,8 +231,13 @@ jobs:
           cp server/server.jar "$STAGE/server.jar"
           cp client/assets/app_icon.png "$STAGE/app_icon.png"
 
-          # Bundle compiled SDL3 shared library
-          cp -L /usr/local/lib/libSDL3.so.0 "$STAGE/lib/libSDL3.so.0"
+          # Bundle compiled SDL3 shared library (find dynamically across GNUInstallDirs lib paths)
+          SDL3_SO="$(find /tmp/sdl3-build /usr/local/lib* -maxdepth 3 -name 'libSDL3.so.0*' \( -type f -o -type l \) 2>/dev/null | head -n 1)"
+          if [ -z "$SDL3_SO" ]; then
+            echo "ERROR: Could not locate compiled libSDL3.so.0" >&2
+            exit 1
+          fi
+          cp -L "$SDL3_SO" "$STAGE/lib/libSDL3.so.0"
           ln -sf libSDL3.so.0 "$STAGE/lib/libSDL3.so"
 
           cat > "$STAGE/mobile-mirror.sh" <<'EOF'
