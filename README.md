@@ -21,21 +21,24 @@
 
 ---
 
-## Downloads
+## Downloads & Installation
 
-Download the latest installer for your operating system from **[GitHub Releases](https://github.com/Frontend-fuchhey/mobile-mirror/releases)**:
+Download the latest installer for your operating system from **[GitHub Releases](https://github.com/Frontend-fuchhey/mobile-mirror/releases)** or **[mobile-mirror.vercel.app](https://mobile-mirror.vercel.app)**:
 
-- **Windows (10 / 11 64-bit)**: `MobileMirror-Setup.exe`
-- **macOS (Apple Silicon)**: `MobileMirror-macOS.dmg`
+- **Windows (10 / 11 64-bit)**:
+  - **Recommended (No SmartScreen popup via Windows Package Manager):**
+    ```powershell
+    winget install Frontend-fuchhey.MobileMirror
+    ```
+  - **Direct Installer:** `MobileMirror-Setup.exe` *(if Windows Defender SmartScreen prompts on a fresh release, click **More info** -> **Run anyway**)*
+- **macOS (Apple Silicon)**: `MobileMirror-macOS.dmg` *(contains `Mobile Mirror.app` and a one-click `First Time Open (Bypass Gatekeeper).command`)*
 - **Linux (x86_64)**: `MobileMirror-Linux-amd64.deb` or `MobileMirror-Linux-x86_64.tar.gz`
 
 ---
 
-## Code Signing & Privacy Policy
+## Privacy & Verification
 
-Free code signing on Windows is provided by [SignPath.io](https://signpath.io/), and the code signing certificate is provided by the [SignPath Foundation](https://signpath.org/).
-
-- **Maintainers**: [Frontend-fuchhey](https://github.com/Frontend-fuchhey)
+- **Open-Source Builds**: All official installers are compiled directly from this repository's public source code via GitHub Actions with verifiable SHA-256 checksums (`SHA256SUMS.txt`).
 - **Privacy Policy**: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. All screen mirroring, audio streaming, and video recording happen locally on your device.
 
 ---

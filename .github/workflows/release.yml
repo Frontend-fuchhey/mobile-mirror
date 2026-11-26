@@ -451,3 +451,13 @@ jobs:
               --title "Mobile Mirror ${TAG}" \
               --generate-notes
           fi
+
+      - name: Submit updated manifest to Microsoft winget-pkgs
+        if: env.WINGET_TOKEN != ''
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: Frontend-fuchhey.MobileMirror
+          installers-regex: '\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
