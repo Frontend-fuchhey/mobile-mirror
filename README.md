@@ -14,9 +14,9 @@
 
 ## Visual Preview
 
-![Demo](./assets/demo.gif)
+https://github.com/Frontend-fuchhey/mobile-mirror/raw/main/assets/mm.mp4
 
-*Mobile Mirror dashboard streaming a live 60 FPS Android/iOS device feed with hardware-accelerated decoding and one-click MP4 recording. (Replace `./assets/demo.gif` with a recorded capture or `./app.png`.)*
+*Mobile Mirror dashboard streaming a live 60 FPS Android/iOS device feed with hardware-accelerated decoding and one-click MP4 recording.*
 
 ---
 
