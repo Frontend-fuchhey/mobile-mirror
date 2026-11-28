@@ -1,4 +1,4 @@
-# Mobile Mirror
+# Mobile Mirror!
 
 **Low-latency Android and iOS screen mirroring and zero-re-encoding MP4 recording for Windows, macOS, and Linux — built for developers, educators, and content creators.**
 
