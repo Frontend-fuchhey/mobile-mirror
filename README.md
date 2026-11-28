@@ -3,7 +3,6 @@
 **Low-latency Android and iOS screen mirroring and zero-re-encoding MP4 recording for Windows, macOS, and Linux — built for developers, educators, and content creators.**
 
 [![Release](https://img.shields.io/github/v/release/Frontend-fuchhey/mobile-mirror?style=flat-square)](https://github.com/Frontend-fuchhey/mobile-mirror/releases)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/Frontend-fuchhey/mobile-mirror/release.yml?style=flat-square&label=release%20build)](https://github.com/Frontend-fuchhey/mobile-mirror/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/client-Rust%20%2B%20SDL3%20%2B%20FFmpeg-orange.svg?style=flat-square)](client/Cargo.toml)
 [![Java](https://img.shields.io/badge/android%20server-Java%20DEX-red.svg?style=flat-square)](server/)
